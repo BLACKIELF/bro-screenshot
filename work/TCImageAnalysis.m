@@ -69,6 +69,56 @@ NSArray<NSValue *> *TCSensitiveTextRanges(NSString *text) {
     }
     return ranges;
 }
+static NSData *PixelateImage(CGImageRef image, NSArray<NSValue *> *regions, NSError **error) {
+    size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
+    CGColorSpaceRef color = CGColorSpaceCreateDeviceRGB();
+    CGBitmapInfo bitmapInfo = kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big;
+    CGContextRef source = CGBitmapContextCreate(NULL, width, height, 8, width * 4, color, bitmapInfo);
+    CGContextRef context = CGBitmapContextCreate(NULL, width, height, 8, width * 4, color, bitmapInfo);
+    CGColorSpaceRelease(color);
+    if (!source || !context) {
+        if (source) CGContextRelease(source);
+        if (context) CGContextRelease(context);
+        AnalysisError(error, 2, @"遮挡图片无法创建"); return nil;
+    }
+    CGContextDrawImage(source, CGRectMake(0, 0, width, height), image);
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+    CGContextSetBlendMode(context, kCGBlendModeCopy);
+    CGContextSetShouldAntialias(context, false);
+    const uint8_t *pixels = CGBitmapContextGetData(source);
+    size_t rowBytes = CGBitmapContextGetBytesPerRow(source);
+    for (NSValue *region in regions) {
+        CGRect rect = CGRectIntersection(CGRectIntegral(NSRectToCGRect(region.rectValue)), CGRectMake(0, 0, width, height));
+        if (CGRectIsEmpty(rect)) continue;
+        // Average every pixel of each cell from the immutable source. Clipping
+        // precedes sampling so a partial edge cell cannot pull unrelated colors
+        // from outside the detected region, or compound an overlapping mosaic.
+        size_t cell = (size_t)ceil(MAX(8.0, MIN(18.0, rect.size.height * 0.45)));
+        size_t maxX = (size_t)CGRectGetMaxX(rect), maxY = (size_t)CGRectGetMaxY(rect);
+        for (size_t y = (size_t)CGRectGetMinY(rect); y < maxY; y += cell) {
+            for (size_t x = (size_t)CGRectGetMinX(rect); x < maxX; x += cell) {
+                size_t endX = MIN(x + cell, maxX), endY = MIN(y + cell, maxY);
+                uint64_t r = 0, g = 0, b = 0, a = 0;
+                for (size_t py = y; py < endY; py++) for (size_t px = x; px < endX; px++) {
+                    // Quartz rectangles use a bottom origin, while bitmap
+                    // storage starts with the top row.
+                    const uint8_t *p = pixels + (height - 1 - py) * rowBytes + px * 4;
+                    r += p[0]; g += p[1]; b += p[2]; a += p[3];
+                }
+                CGFloat alpha = a / ((CGFloat)(endX - x) * (endY - y) * 255.0);
+                CGContextSetRGBFillColor(context, a ? (CGFloat)r / a : 0,
+                    a ? (CGFloat)g / a : 0, a ? (CGFloat)b / a : 0, alpha);
+                CGContextFillRect(context, CGRectMake(x, y, endX - x, endY - y));
+            }
+        }
+    }
+    CGContextRelease(source);
+    CGImageRef result = CGBitmapContextCreateImage(context);
+    CGContextRelease(context);
+    NSData *png = EncodePNG(result, error);
+    if (result) CGImageRelease(result);
+    return png;
+}
 NSData *TCRedactImage(NSData *data, NSUInteger *regionCount, NSError **error) {
     if (regionCount) *regionCount = 0;
     CGImageRef image = ReadImage(data, error);
@@ -99,24 +149,8 @@ NSData *TCRedactImage(NSData *data, NSUInteger *regionCount, NSError **error) {
                                    box.size.width * width, box.size.height * height);
         [regions addObject:[NSValue valueWithRect:NSRectFromCGRect(CGRectInset(pixels, -pixels.size.width * 0.12, -pixels.size.height * 0.12))]];
     }
-    if (!regions.count) { NSData *png = EncodePNG(image, error); CGImageRelease(image); return png; }
-    CGColorSpaceRef color = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(NULL, width, height, 8, 0, color, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
-    CGColorSpaceRelease(color);
-    if (!context) { CGImageRelease(image); AnalysisError(error, 2, @"遮挡图片无法创建"); return nil; }
-    CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+    NSData *png = regions.count ? PixelateImage(image, regions, error) : EncodePNG(image, error);
     CGImageRelease(image);
-    CGContextSetRGBFillColor(context, 0.08, 0.08, 0.08, 1);
-    CGContextSetShouldAntialias(context, false);
-    for (NSValue *region in regions) {
-        CGRect rect = CGRectIntersection(CGRectIntegral(NSRectToCGRect(region.rectValue)), CGRectMake(0, 0, width, height));
-        if (!CGRectIsEmpty(rect)) CGContextFillRect(context, rect);
-    }
-    CGImageRef result = CGBitmapContextCreateImage(context);
-    CGContextRelease(context);
-    NSData *png = EncodePNG(result, error);
-    if (result) CGImageRelease(result);
-    if (!png) return nil;
-    if (regionCount) *regionCount = regions.count;
+    if (png && regionCount) *regionCount = regions.count;
     return png;
 }

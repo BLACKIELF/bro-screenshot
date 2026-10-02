@@ -351,10 +351,10 @@ static void UncaughtException(NSException *exception) {
         panel.backgroundColor = NSColor.controlBackgroundColor;
         panel.level = toolbar.level;
         panel.collectionBehavior = toolbar.collectionBehavior;
-        NSArray *titles = @[@"置顶", @"二维码", @"智能遮挡", @"翻译"];
+        NSArray *titles = @[@"置顶", @"二维码", @"AI马赛克", @"翻译"];
         NSArray *tips = @[@"将选区和标注置顶到桌面，保留剪贴板",
                          @"本机识别二维码/条码，只显示结果，不打开链接",
-                         @"本机识别人脸、手机号、邮箱及长号码，检查预览后再复制或保存",
+                         @"本机识别人脸、手机号、邮箱及长号码，像素化处理后检查预览",
                          @"译文直接显示在截图中的原文字位置，支持切换原图、复制和保存译图（macOS 15+）"];
         for (NSInteger i = 0; i < 4; i++) {
             TCPinToolbarButton *button = [[TCPinToolbarButton alloc] initWithFrame:NSMakeRect(i ? 50 + (i - 1) * 78 : 0, 0, i ? 78 : 50, 30)];

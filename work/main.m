@@ -322,7 +322,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
         self.captureItem.title = @"截图  ⌘⌃A";
         NSDictionary *results = @{@0:@"图片已复制", @1:@"图片已保存", @2:@"识别文字已复制", @10:@"已取消 · 剪贴板保持原样", @11:@"已取消保存 · 剪贴板保持原样", @12:@"未识别到文字 · 剪贴板保持原样", @20:@"截图进程缺少录屏权限，请从菜单正常授权", @21:@"截图组件接口不兼容，已停止", @22:@"屏幕采集失败或显示器发生变化，已退出", @23:@"原生编辑器未启动，已退出", @24:@"图片转换或复制失败", @25:@"长截图未能完成，已退出", @26:@"截图组件异常，已回收窗口", @27:@"图像处理超时，已退出", @28:@"图片保存失败", @29:@"文字识别失败", @30:@"工作进程监管初始化失败", @31:@"截图已置顶在桌面"};
         NSString *message = results[@(value)] ?: [NSString stringWithFormat:@"截图工作进程已结束（%d），可以重试", value];
-        NSDictionary *analysisResults = @{@13:@"未发现二维码或条码 · 剪贴板保持原样", @32:@"二维码已识别 · 点击复制后才替换剪贴板", @33:@"智能遮挡已完成 · 请检查预览", @34:@"二维码识别未完成 · 剪贴板保持原样", @35:@"智能遮挡未完成 · 剪贴板保持原样"};
+        NSDictionary *analysisResults = @{@13:@"未发现二维码或条码 · 剪贴板保持原样", @32:@"二维码已识别 · 点击复制后才替换剪贴板", @33:@"AI马赛克已完成 · 请检查预览", @34:@"二维码识别未完成 · 剪贴板保持原样", @35:@"AI马赛克未完成 · 剪贴板保持原样"};
         if (analysisResults[@(value)]) message = analysisResults[@(value)];
         if (!self.registrationOK) message = [message stringByAppendingString:@" · ⌘⌃A 未注册"];
         [self setStatus:message];
@@ -440,9 +440,9 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 720, 540)
                        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                        backing:NSBackingStoreBuffered defer:NO];
-    panel.title = @"bro截图 · 智能遮挡预览"; panel.delegate = self;
+    panel.title = @"bro截图 · AI马赛克预览"; panel.delegate = self;
     panel.releasedWhenClosed = NO; panel.hidesOnDeactivate = NO;
-    NSTextField *label = [NSTextField labelWithString:count ? [NSString stringWithFormat:@"已遮挡 %lu 处敏感文字/人脸，请检查结果。", (unsigned long)count] : @"未检测到敏感内容，图片未修改。"];
+    NSTextField *label = [NSTextField labelWithString:count ? [NSString stringWithFormat:@"已像素化 %lu 处敏感文字/人脸，请检查结果。", (unsigned long)count] : @"未检测到敏感内容，图片未修改。"];
     label.frame = NSMakeRect(20, 502, 680, 24);
     label.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [panel.contentView addSubview:label];
@@ -451,7 +451,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     image.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     image.accessibilityLabel = @"遮挡后的截图预览";
     [panel.contentView addSubview:image];
-    NSTextField *hint = [NSTextField wrappingLabelWithString:@"自动识别可能漏检，请检查后再复制或保存。关闭窗口不会替换剪贴板。"];
+    NSTextField *hint = [NSTextField wrappingLabelWithString:@"本机识别可能漏检，请检查像素化结果后再复制或保存。关闭窗口不会替换剪贴板。"];
     hint.frame = NSMakeRect(20, 55, 680, 36); hint.autoresizingMask = NSViewWidthSizable;
     [panel.contentView addSubview:hint];
     NSArray *titles = @[@"复制图片", @"保存 PNG…", @"置顶", @"关闭"];
@@ -466,7 +466,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     [NSApp activateIgnoringOtherApps:YES];
 }
 - (void)copyRedaction:(id)sender {
-    if (CopyPNG(self.redactedPNG)) [self setStatus:@"遮挡后的图片已复制"];
+    if (CopyPNG(self.redactedPNG)) [self setStatus:@"AI马赛克图片已复制"];
     else NSBeep();
 }
 - (void)saveRedaction:(id)sender { SavePNG(self.redactedPNG); }
@@ -485,7 +485,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     NSAlert *alert = [NSAlert new];
     BOOL hasScreenPermission = CGPreflightScreenCaptureAccess();
     NSLog(@"screen_permission_preflight=%d", hasScreenPermission);
-    alert.messageText = @"bro截图 · 1.0（1002v3）";
+    alert.messageText = @"bro截图 · 1.0（1002v4）";
     alert.informativeText = [NSString stringWithFormat:@"录屏权限：%@。\n微信联动：%@。\n\n固定快捷键：Command + Control + A。\n再次按下或 Esc 可取消本次截图。快捷键注册失败时会明确提示。\n\n框选后点“翻译”，译文会显示在截图的原文字位置，可切换语言、查看原图、复制或保存译图（macOS 15+）。\n保留原生标注和提取文字；首次翻译语言包下载由系统确认。\n\n录屏权限需由 macOS 正常授予。", hasScreenPermission ? @"已获得" : @"未获得", TCLifecycleAgentStatus()];
     [alert addButtonWithTitle:@"关闭"]; [alert addButtonWithTitle:@"请求录屏权限"];
     [alert addButtonWithTitle:@"开始截图"].enabled = hasScreenPermission;
@@ -552,7 +552,7 @@ int main(int argc, const char *argv[]) {
         }
         if (argc > 1 && (!strcmp(argv[1], "--verify-engine") || !strcmp(argv[1], "--diagnose"))) {
             NSError *error = nil; BOOL ok = TCVerifyEngine(&error);
-            NSDictionary *report = @{@"version":@"1002v3-candidate", @"fullPrivateABIValidated":@(ok), @"error":error.localizedDescription ?: @"", @"guiTested":@NO, @"appPermissionVerified":@NO, @"note":@"No NSApplication, capture, permission request or editor started."};
+            NSDictionary *report = @{@"version":@"1002v4-candidate", @"fullPrivateABIValidated":@(ok), @"error":error.localizedDescription ?: @"", @"guiTested":@NO, @"appPermissionVerified":@NO, @"note":@"No NSApplication, capture, permission request or editor started."};
             NSData *json = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:NULL];
             puts([[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding].UTF8String); return ok ? 0 : 1;
         }

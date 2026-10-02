@@ -12,6 +12,8 @@
 !/docs/validation-1002v2.md
 !/docs/source-manifest-1002v3.json
 !/docs/validation-1002v3.md
+!/docs/source-manifest-1002v4.json
+!/docs/validation-1002v4.md
 !/work/main.m
 !/work/TCWorker.m
 !/work/TCWorker.h
@@ -49,3 +51,4 @@
 !/work/qa/test-ocr-retry.m
 !/work/qa/ocr-helper-error-fixture.py
 !/work/qa/test-long-completion.m
+!/work/qa/test-mosaic-pixels.m
