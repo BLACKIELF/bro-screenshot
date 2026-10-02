@@ -244,23 +244,11 @@ NSData *TCRenderImageTranslations(NSData *data, NSArray<NSDictionary *> *regions
         NSColor *background = BorderColor(bitmap, box);
         CGFloat luminance = background.redComponent * .2126 + background.greenComponent * .7152 + background.blueComponent * .0722;
         NSColor *foreground = luminance < .5 ? NSColor.whiteColor : NSColor.blackColor;
-        // Allow wrapping into nearby blank space, stopping before other OCR boxes.
-        CGFloat right = MIN(size.width - 2, NSMaxX(box) + box.size.width * .5);
-        CGFloat bottom = MAX(2, NSMinY(box) - box.size.height * .75);
-        for (NSDictionary *other in regions) {
-            if (other == unit) continue;
-            NSRect next = RegionRect(other, size);
-            if (NSMinX(next) >= NSMaxX(box) && NSMinY(next) < NSMaxY(box) && NSMaxY(next) > NSMinY(box)) right = MIN(right, NSMinX(next) - 3);
-            if (NSMaxY(next) <= NSMinY(box) && NSMinX(next) < right && NSMaxX(next) > NSMinX(box)) bottom = MAX(bottom, NSMaxY(next) + 3);
-        }
-        NSRect layout = NSMakeRect(NSMinX(cover), MIN(bottom, NSMinY(cover)),
-                                   MAX(cover.size.width, right - NSMinX(cover)), NSMaxY(cover) - MIN(bottom, NSMinY(cover)));
+        // OCR only describes text. Adjacent space can contain graphics, so fit
+        // every translation inside its source region rather than erasing it.
+        NSRect layout = cover;
         CGFloat fontSize = MAX(4, box.size.height * .85);
-        // Short translations already fit where the source text was. Do not
-        // erase adjacent graphics just because extra wrapping space is available.
-        CTFrameRef textFrame = TranslationTextFrame(text, fontSize, foreground, cover);
-        if (CTFrameGetVisibleStringRange(textFrame).length == (CFIndex)text.length) layout = cover;
-        else { CFRelease(textFrame); textFrame = NULL; }
+        CTFrameRef textFrame = NULL;
         while (!textFrame && fontSize >= 4) {
             textFrame = TranslationTextFrame(text, fontSize, foreground, layout);
             // Use the very same layout engine for fitting and drawing. NSString

@@ -33,6 +33,10 @@ int main(int argc, const char **argv) {
         NSBitmapImageRep *rendered = [NSBitmapImageRep imageRepWithData:after]; assert(rendered.pixelsWide==1200 && rendered.pixelsHigh==600);
         NSColor *tile=[rendered colorAtX:1100 y:50]; assert(tile.blueComponent>.98 && tile.redComponent<.02);
         NSString *recognized = TCRecognizeImageText(after,&error); assert(recognized.length && !error);
+        NSMutableArray *words=[NSMutableArray new];
+        for (NSString *word in [recognized componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet])
+            if (word.length) [words addObject:word];
+        recognized=[words componentsJoinedByString:@" "];
         assert([recognized containsString:@"After"] && [recognized containsString:@"Please"] && [recognized containsString:@"你好"]);
         assert(![recognized containsString:@"Hello"] && ![recognized containsString:@"截图完成"]);
         assert([recognized containsString:@"save it."] && [recognized containsString:@"translation result."]);
