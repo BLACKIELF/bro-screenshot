@@ -144,10 +144,27 @@ NSArray<NSDictionary *> *TCImageTextRegions(NSData *data, NSError **error) {
 NSRect TCImageTranslationPanelFrame(NSRect image, NSRect visible, NSRect *toolbar) {
     CGFloat width = MIN(560, visible.size.width - 20), height = 116;
     CGFloat x = MAX(NSMinX(visible) + 10, MIN(NSMinX(image), NSMaxX(visible) - width - 10));
-    CGFloat y = NSMinY(image) - height - 4;
-    if (y < NSMinY(visible)) y = NSMaxY(image) + 4;
-    y = MAX(NSMinY(visible), MIN(y, NSMaxY(visible) - height));
-    *toolbar = NSMakeRect(x, y, width, height);
+    CGFloat sideY = MAX(NSMinY(visible), MIN(NSMaxY(image) - height, NSMaxY(visible) - height));
+    NSRect choices[] = {NSMakeRect(x, NSMinY(image) - height - 4, width, height),
+                        NSMakeRect(x, NSMaxY(image) + 4, width, height),
+                        NSMakeRect(NSMaxX(image) + 4, sideY, width, height),
+                        NSMakeRect(NSMinX(image) - width - 4, sideY, width, height)};
+    for (int i = 0; i < 4; i++) {
+        if (NSContainsRect(visible, choices[i]) && !NSIntersectsRect(image, choices[i])) {
+            *toolbar = choices[i]; return NSUnionRect(image, *toolbar);
+        }
+    }
+    // A full-screen selection cannot leave room for controls. Keep the image
+    // anchored and use the screen edge with the smallest unavoidable overlap.
+    CGFloat leastOverlap = CGFLOAT_MAX;
+    for (int i = 0; i < 4; i++) {
+        NSRect choice = choices[i];
+        choice.origin.x = MAX(NSMinX(visible) + 10, MIN(choice.origin.x, NSMaxX(visible) - width - 10));
+        choice.origin.y = MAX(NSMinY(visible), MIN(choice.origin.y, NSMaxY(visible) - height));
+        NSRect overlap = NSIntersectionRect(image, choice);
+        CGFloat area = NSIsEmptyRect(overlap) ? 0 : overlap.size.width * overlap.size.height;
+        if (area < leastOverlap) { leastOverlap = area; *toolbar = choice; }
+    }
     return NSUnionRect(image, *toolbar);
 }
 static NSRect RegionRect(NSDictionary *unit, NSSize size) {
@@ -155,17 +172,24 @@ static NSRect RegionRect(NSDictionary *unit, NSSize size) {
                       [unit[@"width"] doubleValue] * size.width, [unit[@"height"] doubleValue] * size.height);
 }
 // Pick the most common border color, avoiding the foreground text inside the box.
-static NSColor *BorderColor(NSBitmapImageRep *pixels, NSRect box) {
+static NSColor *BorderColor(CGContextRef bitmap, NSRect box) {
+    const uint8_t *pixels = CGBitmapContextGetData(bitmap);
+    NSInteger width = CGBitmapContextGetWidth(bitmap), height = CGBitmapContextGetHeight(bitmap);
+    size_t rowBytes = CGBitmapContextGetBytesPerRow(bitmap);
     NSMutableDictionary<NSNumber *, NSNumber *> *counts = [NSMutableDictionary new];
     NSMutableDictionary<NSNumber *, NSColor *> *colors = [NSMutableDictionary new];
     for (int side = 0; side < 4; side++) for (int i = 0; i < 24; i++) {
         CGFloat t = (i + 0.5) / 24;
         NSInteger x = lround(side < 2 ? NSMinX(box) + t * box.size.width : (side == 2 ? NSMinX(box) - 2 : NSMaxX(box) + 2));
         NSInteger y = lround(side >= 2 ? NSMinY(box) + t * box.size.height : (side == 0 ? NSMinY(box) - 2 : NSMaxY(box) + 2));
-        x = MAX(0, MIN(pixels.pixelsWide - 1, x));
-        y = MAX(0, MIN(pixels.pixelsHigh - 1, pixels.pixelsHigh - 1 - y));
-        NSColor *color = [[pixels colorAtX:x y:y] colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
-        if (!color) continue;
+        x = MAX(0, MIN(width - 1, x));
+        y = MAX(0, MIN(height - 1, height - 1 - y));
+        const uint8_t *sample = pixels + y * rowBytes + x * 4;
+        if (!sample[3]) continue;
+        // Sample the rendered bitmap's RGB values, so filling uses the same
+        // color space. Converting through NSColor can brighten dark backgrounds.
+        NSColor *color = [NSColor colorWithDeviceRed:(double)sample[0] / sample[3]
+                          green:(double)sample[1] / sample[3] blue:(double)sample[2] / sample[3] alpha:1];
         NSUInteger r = lround(color.redComponent * 255), g = lround(color.greenComponent * 255), b = lround(color.blueComponent * 255);
         NSNumber *key = @(((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
         counts[key] = @([counts[key] unsignedIntegerValue] + 1); colors[key] = color;
@@ -174,15 +198,27 @@ static NSColor *BorderColor(NSBitmapImageRep *pixels, NSRect box) {
     for (NSNumber *key in counts) if (!best || counts[key].integerValue > counts[best].integerValue) best = key;
     return best ? colors[best] : NSColor.whiteColor;
 }
+static CTFrameRef TranslationTextFrame(NSString *text, CGFloat fontSize, NSColor *foreground, NSRect layout) {
+    NSFont *font = [NSFont systemFontOfSize:fontSize];
+    CTFontRef ctFont = CTFontCreateWithName((__bridge CFStringRef)font.fontName, fontSize, NULL);
+    NSDictionary *attributes = @{(__bridge NSString *)kCTFontAttributeName:(__bridge id)ctFont,
+                    (__bridge NSString *)kCTForegroundColorAttributeName:(__bridge id)foreground.CGColor};
+    NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:text attributes:attributes];
+    CFRelease(ctFont);
+    CTFramesetterRef setter = CTFramesetterCreateWithAttributedString((__bridge CFAttributedStringRef)attributed);
+    CGPathRef path = CGPathCreateWithRect(NSRectToCGRect(NSInsetRect(layout, 1, 1)), NULL);
+    CTFrameRef frame = CTFramesetterCreateFrame(setter, CFRangeMake(0, 0), path, NULL);
+    CGPathRelease(path); CFRelease(setter);
+    return frame;
+}
 NSData *TCRenderImageTranslations(NSData *data, NSArray<NSDictionary *> *regions,
                                   NSDictionary<NSString *, NSString *> *translations, NSError **error) {
     CGImageRef original = TranslationImage(data, error);
     if (!original) return nil;
     NSSize size = NSMakeSize(CGImageGetWidth(original), CGImageGetHeight(original));
-    NSBitmapImageRep *pixels = [[NSBitmapImageRep alloc] initWithCGImage:original];
     CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
     CGContextRef bitmap = CGBitmapContextCreate(NULL, size.width, size.height, 8, 0, space,
-                                                (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+                                                kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(space);
     if (!bitmap) { CGImageRelease(original); TranslationImageError(error, 2, @"无法创建译图"); return nil; }
     CGContextDrawImage(bitmap, CGRectMake(0, 0, size.width, size.height), original); CGImageRelease(original);
@@ -197,7 +233,7 @@ NSData *TCRenderImageTranslations(NSData *data, NSArray<NSDictionary *> *regions
             !isfinite(box.origin.x) || !isfinite(box.origin.y)) continue;
         NSRect cover = NSIntersectionRect(NSInsetRect(box, -2, -2), NSMakeRect(0, 0, size.width, size.height));
         if (NSIsEmptyRect(cover)) continue;
-        NSColor *background = BorderColor(pixels, box);
+        NSColor *background = BorderColor(bitmap, box);
         CGFloat luminance = background.redComponent * .2126 + background.greenComponent * .7152 + background.blueComponent * .0722;
         NSColor *foreground = luminance < .5 ? NSColor.whiteColor : NSColor.blackColor;
         // Allow wrapping into nearby blank space, stopping before other OCR boxes.
@@ -211,19 +247,14 @@ NSData *TCRenderImageTranslations(NSData *data, NSArray<NSDictionary *> *regions
         }
         NSRect layout = NSMakeRect(NSMinX(cover), MIN(bottom, NSMinY(cover)),
                                    MAX(cover.size.width, right - NSMinX(cover)), NSMaxY(cover) - MIN(bottom, NSMinY(cover)));
-        CTFrameRef textFrame = NULL;
         CGFloat fontSize = MAX(4, box.size.height * .85);
-        while (fontSize >= 4) {
-            NSFont *font = [NSFont systemFontOfSize:fontSize];
-            CTFontRef ctFont = CTFontCreateWithName((__bridge CFStringRef)font.fontName, fontSize, NULL);
-            NSDictionary *attributes = @{(__bridge NSString *)kCTFontAttributeName:(__bridge id)ctFont,
-                        (__bridge NSString *)kCTForegroundColorAttributeName:(__bridge id)foreground.CGColor};
-            NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:text attributes:attributes];
-            CFRelease(ctFont);
-            CTFramesetterRef setter = CTFramesetterCreateWithAttributedString((__bridge CFAttributedStringRef)attributed);
-            CGPathRef path = CGPathCreateWithRect(NSRectToCGRect(NSInsetRect(layout, 1, 1)), NULL);
-            textFrame = CTFramesetterCreateFrame(setter, CFRangeMake(0, 0), path, NULL);
-            CGPathRelease(path); CFRelease(setter);
+        // Short translations already fit where the source text was. Do not
+        // erase adjacent graphics just because extra wrapping space is available.
+        CTFrameRef textFrame = TranslationTextFrame(text, fontSize, foreground, cover);
+        if (CTFrameGetVisibleStringRange(textFrame).length == (CFIndex)text.length) layout = cover;
+        else { CFRelease(textFrame); textFrame = NULL; }
+        while (!textFrame && fontSize >= 4) {
+            textFrame = TranslationTextFrame(text, fontSize, foreground, layout);
             // Use the very same layout engine for fitting and drawing. NSString
             // measurement can otherwise accept text whose final wrapped line clips.
             CFRange visible = CTFrameGetVisibleStringRange(textFrame);
@@ -231,7 +262,7 @@ NSData *TCRenderImageTranslations(NSData *data, NSArray<NSDictionary *> *regions
             CFRelease(textFrame); textFrame = NULL;
             fontSize -= .5;
         }
-        if (fontSize < 4) {
+        if (!textFrame) {
             [NSGraphicsContext restoreGraphicsState]; CGContextRelease(bitmap);
             TranslationImageError(error, 3, @"译文太长，原位置放不下。请放大内容后重新截图。"); return nil;
         }
