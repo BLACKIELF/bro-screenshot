@@ -44,7 +44,7 @@ NSArray<NSDictionary *> *TCImageTextRegionsDirect(NSData *data, NSError **error)
     }
     return regions;
 }
-static NSArray<NSDictionary *> *ImageTextRegionsOnce(NSData *data, NSError **error) {
+static NSArray<NSDictionary *> *ImageRegionsOnce(NSData *data, BOOL mosaic, NSError **error) {
     if (error) *error = nil;
     if (!data.length || data.length > 256 * 1024 * 1024) {
         TranslationImageError(error, 1, @"截图为空或数据过大，请缩小选区"); return nil;
@@ -62,6 +62,7 @@ static NSArray<NSDictionary *> *ImageTextRegionsOnce(NSData *data, NSError **err
         TranslationImageError(error, 5, @"本机识别组件缺失，请重新构建 bro截图"); return nil;
     }
     NSTask *task = [NSTask new]; task.executableURL = helper;
+    if (mosaic) task.arguments = @[@"--mosaic"];
     NSPipe *input = [NSPipe pipe], *output = [NSPipe pipe];
     if (fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != 0) {
         TranslationImageError(error, 5, @"无法安全启动本机识别任务"); return nil;
@@ -110,7 +111,7 @@ static NSArray<NSDictionary *> *ImageTextRegionsOnce(NSData *data, NSError **err
         return nil;
     }
     NSArray *regions = object[@"regions"];
-    if (task.terminationStatus != 0 || ![regions isKindOfClass:NSArray.class]) {
+    if (task.terminationStatus != 0 || ![regions isKindOfClass:NSArray.class] || regions.count > 4096) {
         TranslationImageError(error, 7, @"本机识别未返回有效结果，请重试"); return nil;
     }
     NSMutableSet *ids = [NSMutableSet new];
@@ -126,21 +127,28 @@ static NSArray<NSDictionary *> *ImageTextRegionsOnce(NSData *data, NSError **err
                 TranslationImageError(error, 7, @"识别文字位置无效"); return nil;
             }
         }
+        if (mosaic && ([region[@"width"] doubleValue] <= 0 || [region[@"height"] doubleValue] <= 0 ||
+            [region[@"x"] doubleValue] + [region[@"width"] doubleValue] > 1.000001 ||
+            [region[@"y"] doubleValue] + [region[@"height"] doubleValue] > 1.000001)) {
+            TranslationImageError(error, 7, @"识别区域超出截图，请重试"); return nil;
+        }
         [ids addObject:region[@"id"]];
     }
     return regions;
 }
-NSArray<NSDictionary *> *TCImageTextRegions(NSData *data, NSError **error) {
+static NSArray<NSDictionary *> *RecognizedRegions(NSData *data, BOOL mosaic, NSError **error) {
     NSError *failure = nil;
-    NSArray *regions = ImageTextRegionsOnce(data, &failure);
+    NSArray *regions = ImageRegionsOnce(data, mosaic, &failure);
     // This host occasionally returns a reader error even for a valid screenshot.
     // A new helper succeeded on retry. Retry that exact failure once; never retry
     // malformed images, missing helpers, timeouts or other system errors.
     if (!regions && [failure.domain isEqualToString:@"TextRecognition.CRImageReaderError"] && failure.code == 1)
-        regions = ImageTextRegionsOnce(data, &failure);
+        regions = ImageRegionsOnce(data, mosaic, &failure);
     if (error) *error = regions ? nil : failure;
     return regions;
 }
+NSArray<NSDictionary *> *TCImageTextRegions(NSData *data, NSError **error) { return RecognizedRegions(data, NO, error); }
+NSArray<NSDictionary *> *TCImageMosaicRegions(NSData *data, NSError **error) { return RecognizedRegions(data, YES, error); }
 NSRect TCImageTranslationPanelFrame(NSRect image, NSRect visible, NSRect *toolbar) {
     CGFloat width = MIN(560, visible.size.width - 20), height = 116;
     CGFloat x = MAX(NSMinX(visible) + 10, MIN(NSMinX(image), NSMaxX(visible) - width - 10));

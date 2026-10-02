@@ -8,7 +8,7 @@ if [[ $# -gt 0 ]]; then
     candidate_dir="$1"
     mkdir "$candidate_dir" || { echo '拒绝覆盖已存在的候选目录。' >&2; exit 1; }
 else
-    candidate_dir=$(mktemp -d "$PWD/candidates/1002v5-$(date +%Y%m%d-%H%M%S)-XXXXXX")
+    candidate_dir=$(mktemp -d "$PWD/candidates/1002v6-$(date +%Y%m%d-%H%M%S)-XXXXXX")
 fi
 output="$candidate_dir/bro截图.app"
 for framework in JietuFramework CocoaLumberjack AFNetworking; do
@@ -33,7 +33,7 @@ with open(sys.argv[1],'wb') as f:
       'CFBundleExecutable':'TencentCapture',
       'CFBundleName':'bro截图', 'CFBundleDisplayName':'bro截图',
       'CFBundlePackageType':'APPL', 'CFBundleShortVersionString':'1.0',
-      'CFBundleVersion':'20261002.5', 'LSMinimumSystemVersion':'14.4',
+      'CFBundleVersion':'20261002.6', 'LSMinimumSystemVersion':'14.4',
       'CFBundleIconFile':'AppIcon.icns',
       'LSUIElement':True, 'NSHighResolutionCapable':True,
       'NSPrincipalClass':'NSApplication',
@@ -68,7 +68,7 @@ for name in ('JietuFramework','CocoaLumberjack','AFNetworking'):
     src=digest(source/relative); dst=digest(app/'Contents'/'Frameworks'/relative)
     assert src==dst, name
     frameworks[name]={'sha256':src,'sourceMatches':True}
-(root/'manifest.json').write_text(json.dumps({'version':'1002v5-candidate','app':str(app.resolve()),'sourceSHA256':files,'frameworks':frameworks,'helperSHA256':digest(app/'Contents/MacOS/BroOCRHelper'),'appIconSHA256':digest(app/'Contents'/'Resources'/'AppIcon.icns'),'guiTested':False,'installed':False},ensure_ascii=False,indent=2)+'\n')
+(root/'manifest.json').write_text(json.dumps({'version':'1002v6-candidate','app':str(app.resolve()),'sourceSHA256':files,'frameworks':frameworks,'helperSHA256':digest(app/'Contents/MacOS/BroOCRHelper'),'appIconSHA256':digest(app/'Contents'/'Resources'/'AppIcon.icns'),'guiTested':False,'installed':False},ensure_ascii=False,indent=2)+'\n')
 print(str(app.resolve()))
 PY
 # Do not open GUI or invoke screen capture here.

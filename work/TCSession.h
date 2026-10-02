@@ -15,7 +15,7 @@ typedef struct TCSession TCSession;
  *
  * event is one of:
  *   "spawn"   value is the worker pid
- *   "state"   value is the state byte ('P', 'E', 'S', 'O', 'L', 'A', 'T', or 'F')
+ *   "state"   value is the state byte ('P', 'E', 'S', 'O', 'L', 'A', 'M', 'T', or 'F')
  *   "exit"    value is the normal exit status, or 128 + signal number
  *   "timeout" value is one of the TC_SESSION_TIMEOUT_* constants below
  */

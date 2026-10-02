@@ -55,3 +55,6 @@
 !/work/qa/test-long-completion.m
 !/work/qa/test-mosaic-pixels.m
 !/work/qa/test-translation-layout.m
+!/docs/validation-1002v6.md
+!/docs/source-manifest-1002v6.json
+!/work/qa/test-editor-mosaic.m

@@ -1,12 +1,15 @@
 #import <Foundation/Foundation.h>
 #import "TCImageTranslation.h"
+#import "TCImageAnalysis.h"
 #include <unistd.h>
 #include <fcntl.h>
 
-int main(void) {
+int main(int argc, const char **argv) {
     @autoreleasepool {
         pid_t owner = getppid();
         if (owner <= 1) return 125;
+        BOOL mosaic = argc == 2 && !strcmp(argv[1], "--mosaic");
+        if (argc > 1 && !mosaic) return 64;
         // The screenshot worker owns this short task. A cancelled/dead worker
         // must not leave a recognition process running after it disappears.
         dispatch_source_t guardian = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
@@ -25,7 +28,7 @@ int main(void) {
             }
             [input appendData:chunk];
         }
-        NSArray *regions = error ? nil : TCImageTextRegionsDirect(input, &error);
+        NSArray *regions = error ? nil : (mosaic ? TCDetectImageMosaicRegionsDirect(input, &error) : TCImageTextRegionsDirect(input, &error));
         NSDictionary *result = regions ? @{@"regions":regions} :
             @{@"error":@{@"domain":error.domain ?: @"TCImageOCRHelper", @"code":@(error.code),
                 @"message":error.localizedDescription ?: @"文字识别失败"}};

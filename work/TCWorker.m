@@ -8,6 +8,7 @@
 #import <Vision/Vision.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
+#import <ImageIO/ImageIO.h>
 
 // Every private call/hook below is gated by its full arm64 type encoding.
 @interface NSObject (TCPrivate)
@@ -31,6 +32,19 @@
 - (NSRect)selectedRect;
 - (void)hideToolbar;
 - (void)showToolbar;
+- (id)editViewController;
+- (NSView *)editView;
+- (void)editDidBegin:(id)notification;
+- (id)initWithSuperView:(NSView *)view centerPoint:(NSPoint)center size:(NSSize)size;
+- (NSPoint)center;
+- (NSSize)size;
+- (void)setSize:(NSSize)size;
+- (void)updateControlPoints;
+- (void)transformDidChange;
+- (CGFloat)degrees;
+- (void)addItem:(id)item;
+- (NSMutableArray *)itemArray;
+- (void)unfocus;
 @end
 
 static NSDictionary *RequiredABI(void) {
@@ -40,7 +54,10 @@ static NSDictionary *RequiredABI(void) {
         @"JTCaptureSetting": @{@"+sharedInstance":@"@16@0:8", @"setRunAlone:":@"v20@0:8B16", @"setHighResolution:":@"v20@0:8B16", @"setPlaySound:":@"v20@0:8B16"},
         @"JTCaptureRequest": @{@"setShowSwitch:":@"v20@0:8B16", @"setNeedSelectSavePath:":@"v20@0:8B16"},
         @"JTCaptureWindowController": @{@"screenImage":@"@16@0:8", @"initWithFrame:screen:":@"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48"},
-        @"JTCaptureViewController": @{@"showToolbar":@"v16@0:8", @"hideToolbar":@"v16@0:8", @"toolbarWindowController":@"@16@0:8", @"generateCapturedImage":@"@16@0:8", @"captureView":@"@16@0:8"},
+        @"JTCaptureViewController": @{@"showToolbar":@"v16@0:8", @"hideToolbar":@"v16@0:8", @"toolbarWindowController":@"@16@0:8", @"generateCapturedImage":@"@16@0:8", @"captureView":@"@16@0:8", @"editViewController":@"@16@0:8", @"editDidBegin:":@"v24@0:8@16"},
+        @"JTEditViewController": @{@"editView":@"@16@0:8"},
+        @"JTEditView": @{@"addItem:":@"v24@0:8@16", @"itemArray":@"@16@0:8", @"itemIsBottomLevel:":@"B24@0:8@16", @"undoManager":@"@16@0:8", @"unfocus":@"v16@0:8"},
+        @"JTRoundRectItem": @{@"initWithSuperView:centerPoint:size:":@"@56@0:8@16{CGPoint=dd}24{CGSize=dd}40", @"drawGraph":@"v16@0:8", @"copyWithZone:":@"@24@0:8^{_NSZone=}16", @"center":@"{CGPoint=dd}16@0:8", @"size":@"{CGSize=dd}16@0:8", @"setSize:":@"v32@0:8{CGSize=dd}16", @"updateControlPoints":@"v16@0:8", @"transformDidChange":@"v16@0:8", @"degrees":@"d16@0:8"},
         @"JTCaptureView": @{@"selectedRect":@"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8"},
         @"JTLongCaptureManager": @{@"+sharedInstance":@"@16@0:8", @"prepareToLongCapture":@"v16@0:8", @"isCapturing":@"B16@0:8", @"stream":@"@16@0:8", @"setStream:":@"v24@0:8@16", @"window":@"@16@0:8", @"captureDidFinish:":@"v24@0:8@16", @"captureDidFinishWithImage:needSave:isHighResolution:":@"v32@0:8@16B24B28", @"captureDidCancel":@"v16@0:8"}
     };
@@ -71,6 +88,99 @@ BOOL TCVerifyEngine(NSError **error) {
 @implementation TCPinToolbarButton
 @end
 
+// A rectangular native edit item retains only its pixelated crop. Native
+// controls, move/resize, hit testing and undo keep using the existing editor.
+static char MosaicBitmapKey;
+static Class mosaicItemClass;
+static IMP nativeMosaicCopy;
+static BOOL (*nativeBottomLevel)(id, SEL, id);
+static void (*nativeMosaicAdd)(id, SEL, id);
+static void MosaicDraw(id receiver, SEL selector) {
+    NSBitmapImageRep *bitmap = objc_getAssociatedObject(receiver,&MosaicBitmapKey);
+    if (!bitmap) return;
+    NSPoint center = [(NSObject *)receiver center]; NSSize size = [receiver size];
+    CGContextRef context = NSGraphicsContext.currentContext.CGContext;
+    CGContextSaveGState(context);
+    CGContextTranslateCTM(context,center.x,center.y);
+    CGContextRotateCTM(context,[receiver degrees]*M_PI/180.0);
+    CGContextSetInterpolationQuality(context,kCGInterpolationNone);
+    CGContextDrawImage(context,CGRectMake(-size.width/2,-size.height/2,size.width,size.height),bitmap.CGImage);
+    CGContextRestoreGState(context);
+}
+static id MosaicCopy(id receiver, SEL selector, NSZone *zone) NS_RETURNS_RETAINED;
+static id MosaicCopy(id receiver, SEL selector, NSZone *zone) {
+    id result = CFBridgingRelease(((void *(*)(id,SEL,NSZone *))nativeMosaicCopy)(receiver,selector,zone));
+    objc_setAssociatedObject(result,&MosaicBitmapKey,objc_getAssociatedObject(receiver,&MosaicBitmapKey),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return result;
+}
+static void MosaicAdd(id receiver, SEL selector, id item) {
+    // Keep native add/remove undo registration. Its bottom-level insertion
+    // skips that registration, so move our regular item after adding it.
+    nativeMosaicAdd(receiver,selector,item);
+    if (![item isKindOfClass:mosaicItemClass]) return;
+    NSMutableArray *items = [(NSObject *)receiver itemArray];
+    NSUInteger source = [items indexOfObjectIdenticalTo:item];
+    if (source == NSNotFound) return;
+    NSUInteger target = 0;
+    while (target < source && ([items[target] isKindOfClass:mosaicItemClass] ||
+           nativeBottomLevel(receiver,NSSelectorFromString(@"itemIsBottomLevel:"),items[target]))) target++;
+    if (target == source) return;
+    [items removeObjectAtIndex:source]; [items insertObject:item atIndex:target];
+}
+static Class PrepareMosaicItemClass(void) {
+    if (mosaicItemClass) return mosaicItemClass;
+    if (NSClassFromString(@"BroScreenshotMosaicItem")) return Nil;
+    Class base = NSClassFromString(@"JTRoundRectItem");
+    Class cls = objc_allocateClassPair(base,"BroScreenshotMosaicItem",0);
+    if (!cls) return Nil;
+    Method draw = class_getInstanceMethod(base,@selector(drawGraph));
+    Method copy = class_getInstanceMethod(base,@selector(copyWithZone:));
+    if (!class_addMethod(cls,@selector(drawGraph),(IMP)MosaicDraw,method_getTypeEncoding(draw)) ||
+        !class_addMethod(cls,@selector(copyWithZone:),(IMP)MosaicCopy,method_getTypeEncoding(copy))) {
+        objc_disposeClassPair(cls); return Nil;
+    }
+    nativeMosaicCopy = method_getImplementation(copy);
+    objc_registerClassPair(cls); mosaicItemClass = cls;
+    Class edit = NSClassFromString(@"JTEditView");
+    nativeBottomLevel = (void *)method_getImplementation(class_getInstanceMethod(edit,NSSelectorFromString(@"itemIsBottomLevel:")));
+    nativeMosaicAdd = (void *)method_setImplementation(class_getInstanceMethod(edit,@selector(addItem:)),(IMP)MosaicAdd);
+    return cls;
+}
+static BOOL ApplyMosaicItems(NSView *edit, NSData *png, NSArray<NSDictionary *> *regions, NSError **error) {
+    if (![edit isKindOfClass:NSClassFromString(@"JTEditView")] || NSIsEmptyRect(edit.bounds) || !PrepareMosaicItemClass()) return NO;
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)png,NULL);
+    CGImageRef image = source ? CGImageSourceCreateImageAtIndex(source,0,NULL) : NULL;
+    if (source) CFRelease(source);
+    if (!image) return NO;
+    CGFloat width = CGImageGetWidth(image), height = CGImageGetHeight(image);
+    NSMutableArray *items = [NSMutableArray new];
+    for (NSDictionary *region in regions) {
+        NSRect pixels = NSMakeRect([region[@"x"] doubleValue]*width,[region[@"y"] doubleValue]*height,
+                                  [region[@"width"] doubleValue]*width,[region[@"height"] doubleValue]*height);
+        pixels = NSIntersectionRect(NSIntegralRect(pixels),NSMakeRect(0,0,width,height));
+        CGImageRef crop = CGImageCreateWithImageInRect(image,CGRectMake(pixels.origin.x,height-NSMaxY(pixels),pixels.size.width,pixels.size.height));
+        if (!crop) { CGImageRelease(image); return NO; }
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithCGImage:crop]; CGImageRelease(crop);
+        NSRect rect = NSMakeRect(edit.bounds.origin.x+pixels.origin.x/width*edit.bounds.size.width,
+                                edit.bounds.origin.y+pixels.origin.y/height*edit.bounds.size.height,
+                                pixels.size.width/width*edit.bounds.size.width,pixels.size.height/height*edit.bounds.size.height);
+        id item = [[mosaicItemClass alloc] initWithSuperView:edit centerPoint:NSMakePoint(NSMidX(rect),NSMidY(rect)) size:rect.size];
+        if (!item || !bitmap) { CGImageRelease(image); return NO; }
+        [(NSObject *)item setSize:rect.size];
+        [(NSObject *)item updateControlPoints]; [(NSObject *)item transformDidChange];
+        objc_setAssociatedObject(item,&MosaicBitmapKey,bitmap,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [items addObject:item];
+    }
+    CGImageRelease(image);
+    NSUndoManager *undo = [(id)edit undoManager];
+    // One click is one undo group, preserving all earlier native annotations.
+    [undo beginUndoGrouping];
+    for (id item in items) [(id)edit addItem:item];
+    [undo setActionName:@"AI马赛克"]; [undo endUndoGrouping];
+    [(id)edit unfocus]; [edit setNeedsDisplay:YES];
+    return YES;
+}
+
 @interface TCWorker : NSObject <NSApplicationDelegate>
 @property id manager;
 @property id request;
@@ -90,6 +200,10 @@ BOOL TCVerifyEngine(NSError **error) {
 @property id translationController;
 @property NSMapTable<NSWindow *, NSNumber *> *translationMouseState;
 @property BOOL translationRecognizing;
+@property id mosaicController;
+@property NSUUID *mosaicOperation;
+@property NSMapTable<NSWindow *, NSNumber *> *mosaicMouseState;
+@property NSPanel *mosaicProgress;
 - (void)finish:(NSImage *)image save:(BOOL)save;
 - (void)ocr:(NSImage *)image;
 - (void)end:(int)code;
@@ -100,6 +214,9 @@ BOOL TCVerifyEngine(NSError **error) {
 - (void)analyzeSelection:(TCPinToolbarButton *)sender;
 - (void)translateSelection:(TCPinToolbarButton *)sender;
 - (void)translationDone:(NSData *)png action:(int32_t)action;
+- (void)mosaicSelection:(TCPinToolbarButton *)sender;
+- (void)cancelMosaic:(id)sender;
+- (void)completeMosaic:(NSData *)png regions:(NSArray *)regions operation:(NSUUID *)token view:(NSView *)edit error:(NSError *)error;
 @end
 static TCWorker *worker; // Keep delegate alive, including under ARC -O2.
 static void TranslationDone(const uint8_t *bytes, size_t length, int32_t action) {
@@ -203,6 +320,7 @@ static void UncaughtException(NSException *exception) {
 }
 - (void)end:(int)code {
     self.terminal = YES;
+    [self cancelMosaic:nil];
     TCDismissImageTranslation();
     HideAllWindows();
     NSLog(@"worker_terminal=%d", code);
@@ -305,7 +423,7 @@ static void UncaughtException(NSException *exception) {
         if (![longManager isCapturing] || ![longManager window].visible) [self end:25];
     }
     // Bound background processing, but never time out a responsive editor/save panel.
-    if ((self.phase == 'O' || self.phase == 'A' || self.phase == 'F' || self.translationRecognizing) && elapsed > 120) [self end:27];
+    if ((self.phase == 'O' || self.phase == 'A' || self.phase == 'M' || self.phase == 'F' || self.translationRecognizing) && elapsed > 120) [self end:27];
 }
 - (BOOL)beginResult:(NSImage *)image phase:(char)phase {
     if (self.terminal) return NO;
@@ -336,7 +454,7 @@ static void UncaughtException(NSException *exception) {
     if (panel) [self positionPinToolbar:panel besideWindow:toolbar];
 }
 - (void)showPinToolbarForController:(id)controller {
-    if (self.terminal || self.longActive || self.translationController) return;
+    if (self.terminal || self.longActive || self.translationController || self.mosaicController) return;
     NSWindowController *windowController = [controller toolbarWindowController];
     if (![windowController isKindOfClass:NSWindowController.class]) return;
     NSWindow *toolbar = windowController.window;
@@ -354,7 +472,7 @@ static void UncaughtException(NSException *exception) {
         NSArray *titles = @[@"置顶", @"二维码", @"AI马赛克", @"翻译"];
         NSArray *tips = @[@"将选区和标注置顶到桌面，保留剪贴板",
                          @"本机识别二维码/条码，只显示结果，不打开链接",
-                         @"本机识别人脸、手机号、邮箱及长号码，像素化处理后检查预览",
+                         @"本机识别后直接在选区添加马赛克，可继续标注和撤销",
                          @"译文直接显示在截图中的原文字位置，支持切换原图、复制和保存译图（macOS 15+）"];
         for (NSInteger i = 0; i < 4; i++) {
             TCPinToolbarButton *button = [[TCPinToolbarButton alloc] initWithFrame:NSMakeRect(i ? 50 + (i - 1) * 78 : 0, 0, i ? 78 : 50, 30)];
@@ -403,6 +521,7 @@ static void UncaughtException(NSException *exception) {
     });
 }
 - (void)analyzeSelection:(TCPinToolbarButton *)sender {
+    if (sender.tag == 2) { [self mosaicSelection:sender]; return; }
     id controller = sender.captureController;
     if (self.terminal || self.longActive || ![controller isKindOfClass:NSClassFromString(@"JTCaptureViewController")]) return;
     NSImage *image = [controller generateCapturedImage];
@@ -434,9 +553,82 @@ static void UncaughtException(NSException *exception) {
         }
     });
 }
+- (void)cancelMosaic:(id)sender {
+    if (!self.mosaicController) return;
+    id controller = self.mosaicController;
+    self.mosaicOperation = nil; self.mosaicController = nil;
+    for (NSWindow *window in self.mosaicMouseState.keyEnumerator)
+        window.ignoresMouseEvents = [[self.mosaicMouseState objectForKey:window] boolValue];
+    self.mosaicMouseState = nil;
+    [self.mosaicProgress.parentWindow removeChildWindow:self.mosaicProgress];
+    [self.mosaicProgress close]; self.mosaicProgress = nil;
+    if (!self.terminal) { [self setPhaseValue:'E']; [controller showToolbar]; }
+}
+- (void)mosaicSelection:(TCPinToolbarButton *)sender {
+    id controller = sender.captureController;
+    if (self.terminal || self.longActive || self.translationController || self.mosaicController ||
+        ![controller isKindOfClass:NSClassFromString(@"JTCaptureViewController")]) return;
+    [controller editDidBegin:nil];
+    NSView *edit = [[controller editViewController] editView];
+    if (![edit isKindOfClass:NSClassFromString(@"JTEditView")]) return;
+    NSWindow *owner = edit.window;
+    if (!owner) return;
+    [(id)edit unfocus];
+    NSImage *image = [controller generateCapturedImage];
+    if (![image isKindOfClass:NSImage.class] || NSIsEmptyRect(edit.bounds)) return;
+    self.mosaicController = controller; self.mosaicOperation = [NSUUID UUID];
+    NSUUID *token = self.mosaicOperation;
+    self.mosaicMouseState = [NSMapTable weakToStrongObjectsMapTable];
+    for (id c in [self.manager windowControllers]) {
+        NSWindow *window = [c window]; if (!window) continue;
+        [self.mosaicMouseState setObject:@(window.ignoresMouseEvents) forKey:window];
+        window.ignoresMouseEvents = YES;
+    }
+    [controller hideToolbar]; [self setPhaseValue:'M'];
+    NSRect screen = (owner.screen ?: NSScreen.mainScreen).visibleFrame;
+    NSRect area = [owner convertRectToScreen:[edit convertRect:edit.bounds toView:nil]];
+    CGFloat x = MAX(NSMinX(screen),MIN(NSMinX(area),NSMaxX(screen)-300));
+    CGFloat y = NSMinY(area)-60;
+    if (y < NSMinY(screen)) y = MIN(NSMaxY(area)+4,NSMaxY(screen)-56);
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(x,y,300,56)
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    panel.releasedWhenClosed = NO; panel.hidesOnDeactivate = NO;
+    panel.level = owner.level; panel.collectionBehavior = owner.collectionBehavior;
+    panel.backgroundColor = NSColor.windowBackgroundColor;
+    NSProgressIndicator *progress = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(10,18,20,20)];
+    progress.style = NSProgressIndicatorStyleSpinning; [progress startAnimation:nil]; [panel.contentView addSubview:progress];
+    NSTextField *label = [NSTextField labelWithString:@"正在识别并添加马赛克…"];
+    label.frame = NSMakeRect(40,18,180,20); [panel.contentView addSubview:label];
+    NSButton *cancel = [NSButton buttonWithTitle:@"取消" target:self action:@selector(cancelMosaic:)];
+    cancel.frame = NSMakeRect(230,13,60,30); [panel.contentView addSubview:cancel];
+    self.mosaicProgress = panel; [owner addChildWindow:panel ordered:NSWindowAbove]; [panel orderFront:nil];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        @autoreleasepool {
+            NSError *error = nil;
+            NSData *data = image.TIFFRepresentation;
+            NSArray *regions = TCImageMosaicRegions(data,&error);
+            NSData *png = regions.count ? TCPixelateImageRegions(data,regions,&error) : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [worker completeMosaic:png regions:regions operation:token view:edit error:error];
+            });
+        }
+    });
+}
+- (void)completeMosaic:(NSData *)png regions:(NSArray *)regions operation:(NSUUID *)token view:(NSView *)edit error:(NSError *)error {
+    if (self.terminal || ![self.mosaicOperation isEqual:token]) return;
+    NSError *failure = error;
+    BOOL applied = regions && (!regions.count || (png.length && ApplyMosaicItems(edit,png,regions,&failure)));
+    [self cancelMosaic:nil];
+    if (!applied || !regions.count) {
+        NSAlert *alert = [NSAlert new]; alert.messageText = @"AI马赛克";
+        alert.informativeText = applied ? @"未识别到敏感内容，可继续使用马赛克工具手动遮挡。" :
+            (failure.localizedDescription ?: @"无法添加马赛克，请重试或使用手动马赛克工具。");
+        [alert runModal];
+    } else NSLog(@"editor_mosaic_applied regions=%lu undo_group=1",(unsigned long)regions.count);
+}
 - (void)translateSelection:(TCPinToolbarButton *)sender {
     id controller = sender.captureController;
-    if (self.terminal || self.longActive || self.translationController ||
+    if (self.terminal || self.longActive || self.translationController || self.mosaicController ||
         ![controller isKindOfClass:NSClassFromString(@"JTCaptureViewController")]) return;
     NSView *capture = [controller captureView];
     if (![capture isKindOfClass:NSClassFromString(@"JTCaptureView")]) return;

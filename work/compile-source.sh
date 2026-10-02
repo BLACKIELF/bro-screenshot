@@ -16,7 +16,7 @@ for source in main TCWorker TCOCR TCImageAnalysis TCImageTranslation TCLifecycle
         -mmacosx-version-min=14.4 -c "$source.m" -o "$compile_dir/$source.o"
 done
 /usr/bin/xcrun clang -arch arm64 -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-unused-parameter \
-    -mmacosx-version-min=14.4 TCImageOCRHelper.m "$compile_dir/TCImageTranslation.o" \
+    -mmacosx-version-min=14.4 TCImageOCRHelper.m "$compile_dir/TCImageTranslation.o" "$compile_dir/TCImageAnalysis.o" \
     -framework Cocoa -framework Vision -framework ImageIO -framework CoreText -framework UniformTypeIdentifiers \
     -o "$compile_dir/BroOCRHelper"
 /usr/bin/xcrun swiftc -target arm64-apple-macosx14.4 -O -warnings-as-errors -parse-as-library \

@@ -119,10 +119,7 @@ static NSData *PixelateImage(CGImageRef image, NSArray<NSValue *> *regions, NSEr
     if (result) CGImageRelease(result);
     return png;
 }
-NSData *TCRedactImage(NSData *data, NSUInteger *regionCount, NSError **error) {
-    if (regionCount) *regionCount = 0;
-    CGImageRef image = ReadImage(data, error);
-    if (!image) return nil;
+static NSArray<NSValue *> *SensitiveRegions(CGImageRef image, NSError **error) {
     VNRecognizeTextRequest *text = [VNRecognizeTextRequest new];
     text.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
     text.recognitionLanguages = @[@"zh-Hans", @"en-US"];
@@ -130,7 +127,7 @@ NSData *TCRedactImage(NSData *data, NSUInteger *regionCount, NSError **error) {
     VNDetectFaceRectanglesRequest *faces = [VNDetectFaceRectanglesRequest new];
     BOOL ok = [[[VNImageRequestHandler alloc] initWithCGImage:image options:@{}]
                performRequests:@[text, faces] error:error];
-    if (!ok) { CGImageRelease(image); return nil; }
+    if (!ok) return nil;
     size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
     NSMutableArray<NSValue *> *regions = [NSMutableArray new];
     for (VNRecognizedTextObservation *observation in text.results) {
@@ -149,7 +146,56 @@ NSData *TCRedactImage(NSData *data, NSUInteger *regionCount, NSError **error) {
                                    box.size.width * width, box.size.height * height);
         [regions addObject:[NSValue valueWithRect:NSRectFromCGRect(CGRectInset(pixels, -pixels.size.width * 0.12, -pixels.size.height * 0.12))]];
     }
-    NSData *png = regions.count ? PixelateImage(image, regions, error) : EncodePNG(image, error);
+    return regions;
+}
+NSArray<NSDictionary *> *TCDetectImageMosaicRegionsDirect(NSData *data, NSError **error) {
+    CGImageRef image = ReadImage(data, error);
+    if (!image) return nil;
+    NSArray<NSValue *> *boxes = SensitiveRegions(image, error);
+    NSSize size = NSMakeSize(CGImageGetWidth(image), CGImageGetHeight(image));
+    CGImageRelease(image);
+    if (!boxes) return nil;
+    NSMutableArray *regions = [NSMutableArray new];
+    for (NSValue *value in boxes) {
+        NSRect box = NSIntersectionRect(value.rectValue, NSMakeRect(0,0,size.width,size.height));
+        if (NSIsEmptyRect(box)) continue;
+        [regions addObject:@{@"id":@(regions.count).stringValue,@"text":@"",@"x":@(box.origin.x/size.width),
+            @"y":@(box.origin.y/size.height),@"width":@(box.size.width/size.width),@"height":@(box.size.height/size.height)}];
+    }
+    return regions;
+}
+NSData *TCPixelateImageRegions(NSData *data, NSArray<NSDictionary *> *regions, NSError **error) {
+    CGImageRef image = ReadImage(data, error);
+    if (!image) return nil;
+    CGFloat width = CGImageGetWidth(image), height = CGImageGetHeight(image);
+    NSMutableArray *boxes = [NSMutableArray new];
+    if (![regions isKindOfClass:NSArray.class] || regions.count > 4096) {
+        CGImageRelease(image); AnalysisError(error,4,@"识别区域无效"); return nil;
+    }
+    for (NSDictionary *region in regions) {
+        BOOL valid = [region isKindOfClass:NSDictionary.class];
+        for (NSString *key in @[@"x",@"y",@"width",@"height"]) {
+            id value = valid ? region[key] : nil;
+            if (![value isKindOfClass:NSNumber.class] || !isfinite([value doubleValue]) ||
+                [value doubleValue] < 0 || [value doubleValue] > 1) valid = NO;
+        }
+        if (!valid || [region[@"width"] doubleValue] <= 0 || [region[@"height"] doubleValue] <= 0 ||
+            [region[@"x"] doubleValue]+[region[@"width"] doubleValue] > 1.000001 ||
+            [region[@"y"] doubleValue]+[region[@"height"] doubleValue] > 1.000001) {
+            CGImageRelease(image); AnalysisError(error,4,@"识别区域无效"); return nil;
+        }
+        [boxes addObject:[NSValue valueWithRect:NSMakeRect([region[@"x"] doubleValue]*width,[region[@"y"] doubleValue]*height,
+                                    [region[@"width"] doubleValue]*width,[region[@"height"] doubleValue]*height)]];
+    }
+    NSData *png = boxes.count ? PixelateImage(image,boxes,error) : EncodePNG(image,error);
+    CGImageRelease(image); return png;
+}
+NSData *TCRedactImage(NSData *data, NSUInteger *regionCount, NSError **error) {
+    if (regionCount) *regionCount = 0;
+    CGImageRef image = ReadImage(data, error);
+    if (!image) return nil;
+    NSArray *regions = SensitiveRegions(image, error);
+    NSData *png = regions ? (regions.count ? PixelateImage(image, regions, error) : EncodePNG(image, error)) : nil;
     CGImageRelease(image);
     if (png && regionCount) *regionCount = regions.count;
     return png;

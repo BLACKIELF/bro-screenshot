@@ -22,12 +22,16 @@ args = parser.parse_args()
 helper = str(args.helper.resolve(strict=True))
 assert pathlib.Path(helper).name == 'BroOCRHelper'
 checks = []
-for data in (b'', b'not an image'):
-    result = subprocess.run([helper], input=data, capture_output=True, timeout=15)
-    error = json.loads(result.stdout)['error']
-    assert result.returncode == 1 and error['domain'] and error['message']
-    checks.append({'input': 'empty' if not data else 'invalid', 'exit': result.returncode,
-                   'errorDomain': error['domain'], 'errorCode': error['code']})
+for mode in ([], ['--mosaic']):
+    for data in (b'', b'not an image'):
+        result = subprocess.run([helper] + mode, input=data, capture_output=True, timeout=15)
+        error = json.loads(result.stdout)['error']
+        assert result.returncode == 1 and error['domain'] and error['message']
+        checks.append({'mode': 'mosaic' if mode else 'ocr', 'input': 'empty' if not data else 'invalid', 'exit': result.returncode,
+                       'errorDomain': error['domain'], 'errorCode': error['code']})
+result = subprocess.run([helper, '--unknown-mode'], input=b'', capture_output=True, timeout=15)
+assert result.returncode == 64 and not result.stdout
+checks.append({'input': 'unknown CLI mode', 'exit': result.returncode})
 
 # This parent deliberately exits while its child is blocked reading stdin.
 # The test process owns both pipes, and verifies executable identity before cleanup.

@@ -4,6 +4,7 @@
 NS_ASSUME_NONNULL_BEGIN
 // Vision boxes use normalized image coordinates, with the origin at bottom left.
 NSArray<NSDictionary *> * _Nullable TCImageTextRegions(NSData *image, NSError **error);
+NSArray<NSDictionary *> * _Nullable TCImageMosaicRegions(NSData *image, NSError **error);
 // The helper makes exactly one direct Vision request before exiting.
 NSArray<NSDictionary *> * _Nullable TCImageTextRegionsDirect(NSData *image, NSError **error);
 NSRect TCImageTranslationPanelFrame(NSRect image, NSRect visible, NSRect *toolbar);
