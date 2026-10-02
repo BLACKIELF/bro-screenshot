@@ -504,13 +504,15 @@ int main(int argc, char **argv) {
     failures += run_exit_mode(exe, "healthy-save", TC_WORKER_EXIT_SAVE_SUCCESS, "healthy save heartbeat");
     failures += run_exit_mode(exe, "healthy-ocr", TC_WORKER_EXIT_OCR_SUCCESS, "healthy OCR heartbeat");
     failures += run_exit_mode(exe, "healthy-long", TC_WORKER_EXIT_SUCCESS, "healthy long heartbeat");
+    failures += run_exit_mode(exe, "healthy-analysis", TC_WORKER_EXIT_CODE_SUCCESS, "healthy analysis heartbeat");
+    failures += run_exit_mode(exe, "healthy-translation", TC_WORKER_EXIT_CODE_SUCCESS, "healthy translation heartbeat");
     failures += run_parent_death(exe, false);
     failures += run_parent_death(exe, true);
     failures += run_closed_reader_cancel(exe);
     failures += run_fd_collision(exe);
     failures += run_fd_sentinels(exe);
     if (failures == 0) {
-        puts("PASS session lifecycle: success/cancel/repeat/crash/signal-crash/hang/SIGSTOP/parent death/permission/capture failure/healthy E-S-O-L/closed-reader/FD collision/sentinels");
+        puts("PASS session lifecycle: success/cancel/repeat/crash/signal-crash/hang/SIGSTOP/parent death/permission/capture failure/healthy E-S-O-L-A-T/closed-reader/FD collision/sentinels");
         return 0;
     }
     fprintf(stderr, "%d session lifecycle checks failed\n", failures);

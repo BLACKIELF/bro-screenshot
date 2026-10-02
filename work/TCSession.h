@@ -15,7 +15,7 @@ typedef struct TCSession TCSession;
  *
  * event is one of:
  *   "spawn"   value is the worker pid
- *   "state"   value is the state byte ('P', 'E', 'S', 'O', 'L', or 'F')
+ *   "state"   value is the state byte ('P', 'E', 'S', 'O', 'L', 'A', 'T', or 'F')
  *   "exit"    value is the normal exit status, or 128 + signal number
  *   "timeout" value is one of the TC_SESSION_TIMEOUT_* constants below
  */
@@ -55,6 +55,7 @@ enum {
     TC_WORKER_EXIT_CANCELLED = 10,
     TC_WORKER_EXIT_SAVE_CANCELLED = 11,
     TC_WORKER_EXIT_OCR_EMPTY = 12,
+    TC_WORKER_EXIT_CODE_EMPTY = 13,
     TC_WORKER_EXIT_NO_PERMISSION = 20,
     TC_WORKER_EXIT_ABI_FAILURE = 21,
     TC_WORKER_EXIT_CAPTURE_FAILURE = 22,
@@ -66,7 +67,11 @@ enum {
     TC_WORKER_EXIT_SAVE_FAILURE = 28,
     TC_WORKER_EXIT_OCR_FAILURE = 29,
     TC_WORKER_EXIT_GUARD_FAILURE = 30,
-    TC_WORKER_EXIT_PIN_SUCCESS = 31
+    TC_WORKER_EXIT_PIN_SUCCESS = 31,
+    TC_WORKER_EXIT_CODE_SUCCESS = 32,
+    TC_WORKER_EXIT_REDACTION_SUCCESS = 33,
+    TC_WORKER_EXIT_CODE_FAILURE = 34,
+    TC_WORKER_EXIT_REDACTION_FAILURE = 35
 };
 
 #ifdef __cplusplus

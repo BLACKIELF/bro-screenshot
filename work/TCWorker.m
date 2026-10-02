@@ -1,6 +1,8 @@
 #import "TCWorker.h"
 #import "TCSession.h"
 #import "TCOCR.h"
+#import "TCImageAnalysis.h"
+#import "TCImageTranslation.h"
 #import <Cocoa/Cocoa.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <Vision/Vision.h>
@@ -24,6 +26,10 @@
 - (SCStream *)stream;
 - (id)toolbarWindowController;
 - (NSImage *)generateCapturedImage;
+- (NSView *)captureView;
+- (NSRect)selectedRect;
+- (void)hideToolbar;
+- (void)showToolbar;
 @end
 
 static NSDictionary *RequiredABI(void) {
@@ -33,7 +39,8 @@ static NSDictionary *RequiredABI(void) {
         @"JTCaptureSetting": @{@"+sharedInstance":@"@16@0:8", @"setRunAlone:":@"v20@0:8B16", @"setHighResolution:":@"v20@0:8B16", @"setPlaySound:":@"v20@0:8B16"},
         @"JTCaptureRequest": @{@"setShowSwitch:":@"v20@0:8B16", @"setNeedSelectSavePath:":@"v20@0:8B16"},
         @"JTCaptureWindowController": @{@"screenImage":@"@16@0:8", @"initWithFrame:screen:":@"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48"},
-        @"JTCaptureViewController": @{@"showToolbar":@"v16@0:8", @"hideToolbar":@"v16@0:8", @"toolbarWindowController":@"@16@0:8", @"generateCapturedImage":@"@16@0:8"},
+        @"JTCaptureViewController": @{@"showToolbar":@"v16@0:8", @"hideToolbar":@"v16@0:8", @"toolbarWindowController":@"@16@0:8", @"generateCapturedImage":@"@16@0:8", @"captureView":@"@16@0:8"},
+        @"JTCaptureView": @{@"selectedRect":@"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8"},
         @"JTLongCaptureManager": @{@"+sharedInstance":@"@16@0:8", @"prepareToLongCapture":@"v16@0:8", @"isCapturing":@"B16@0:8", @"stream":@"@16@0:8", @"window":@"@16@0:8", @"captureDidFinish:":@"v24@0:8@16", @"captureDidFinishWithImage:needSave:isHighResolution:":@"v32@0:8@16B24B28", @"captureDidCancel":@"v16@0:8"}
     };
 }
@@ -78,6 +85,9 @@ BOOL TCVerifyEngine(NSError **error) {
 @property BOOL editorRequested;
 @property NSTimeInterval phaseStarted;
 @property NSMapTable<NSWindow *, NSPanel *> *pinToolbarPanels;
+@property id translationController;
+@property NSMapTable<NSWindow *, NSNumber *> *translationMouseState;
+@property BOOL translationRecognizing;
 - (void)finish:(NSImage *)image save:(BOOL)save;
 - (void)ocr:(NSImage *)image;
 - (void)end:(int)code;
@@ -85,8 +95,15 @@ BOOL TCVerifyEngine(NSError **error) {
 - (void)showPinToolbarForController:(id)controller;
 - (void)hidePinToolbarForController:(id)controller;
 - (void)pinSelection:(TCPinToolbarButton *)sender;
+- (void)analyzeSelection:(TCPinToolbarButton *)sender;
+- (void)translateSelection:(TCPinToolbarButton *)sender;
+- (void)translationDone:(NSData *)png action:(int32_t)action;
 @end
 static TCWorker *worker; // Keep delegate alive, including under ARC -O2.
+static void TranslationDone(const uint8_t *bytes, size_t length, int32_t action) {
+    NSData *png = bytes && length ? [NSData dataWithBytes:bytes length:length] : nil;
+    [worker translationDone:png action:action];
+}
 static void (*nativeCancel)(id, SEL);
 static void (*nativeLongTransition)(id, SEL, id);
 static void (*nativeLongDone)(id, SEL, id);
@@ -158,6 +175,7 @@ static void UncaughtException(NSException *exception) {
 }
 - (void)end:(int)code {
     self.terminal = YES;
+    TCDismissImageTranslation();
     HideAllWindows();
     NSLog(@"worker_terminal=%d", code);
     TCWorkerFinish(code); // OS owns the final destruction of every native window/stream.
@@ -259,7 +277,7 @@ static void UncaughtException(NSException *exception) {
         if (![longManager isCapturing] || ![longManager window].visible) [self end:25];
     }
     // Bound background processing, but never time out a responsive editor/save panel.
-    if ((self.phase == 'O' || self.phase == 'F') && elapsed > 120) [self end:27];
+    if ((self.phase == 'O' || self.phase == 'A' || self.phase == 'F' || self.translationRecognizing) && elapsed > 120) [self end:27];
 }
 - (BOOL)beginResult:(NSImage *)image phase:(char)phase {
     if (self.terminal) return NO;
@@ -290,14 +308,14 @@ static void UncaughtException(NSException *exception) {
     if (panel) [self positionPinToolbar:panel besideWindow:toolbar];
 }
 - (void)showPinToolbarForController:(id)controller {
-    if (self.terminal || self.longActive) return;
+    if (self.terminal || self.longActive || self.translationController) return;
     NSWindowController *windowController = [controller toolbarWindowController];
     if (![windowController isKindOfClass:NSWindowController.class]) return;
     NSWindow *toolbar = windowController.window;
     if (!toolbar.visible) return;
     NSPanel *panel = [self.pinToolbarPanels objectForKey:toolbar];
     if (!panel) {
-        panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 48, 30)
+        panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 284, 30)
                                           styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
                                             backing:NSBackingStoreBuffered defer:NO];
         panel.releasedWhenClosed = NO;
@@ -305,15 +323,23 @@ static void UncaughtException(NSException *exception) {
         panel.backgroundColor = NSColor.controlBackgroundColor;
         panel.level = toolbar.level;
         panel.collectionBehavior = toolbar.collectionBehavior;
-        TCPinToolbarButton *button = [[TCPinToolbarButton alloc] initWithFrame:panel.contentView.bounds];
-        button.title = @"置顶";
-        button.toolTip = @"将选区和标注置顶到桌面，保留剪贴板";
-        button.bezelStyle = NSBezelStyleRounded;
-        button.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-        button.target = self;
-        button.action = @selector(pinSelection:);
-        button.captureController = controller;
-        [panel.contentView addSubview:button];
+        NSArray *titles = @[@"置顶", @"二维码", @"智能遮挡", @"翻译"];
+        NSArray *tips = @[@"将选区和标注置顶到桌面，保留剪贴板",
+                         @"本机识别二维码/条码，只显示结果，不打开链接",
+                         @"本机识别人脸、手机号、邮箱及长号码，检查预览后再复制或保存",
+                         @"译文直接显示在截图中的原文字位置，支持切换原图、复制和保存译图（macOS 15+）"];
+        for (NSInteger i = 0; i < 4; i++) {
+            TCPinToolbarButton *button = [[TCPinToolbarButton alloc] initWithFrame:NSMakeRect(i ? 50 + (i - 1) * 78 : 0, 0, i ? 78 : 50, 30)];
+            button.title = titles[i]; button.toolTip = tips[i];
+            button.accessibilityLabel = titles[i];
+            button.bezelStyle = NSBezelStyleRounded;
+            button.target = self;
+            button.action = i == 3 ? @selector(translateSelection:) : (i ? @selector(analyzeSelection:) : @selector(pinSelection:));
+            if (i == 3) { if (@available(macOS 15.0, *)) {} else button.enabled = NO; }
+            button.tag = i;
+            button.captureController = controller;
+            [panel.contentView addSubview:button];
+        }
         [self.pinToolbarPanels setObject:panel forKey:toolbar];
         [toolbar addChildWindow:panel ordered:NSWindowAbove];
         for (NSString *name in @[NSWindowDidMoveNotification, NSWindowDidResizeNotification])
@@ -347,6 +373,89 @@ static void UncaughtException(NSException *exception) {
             });
         }
     });
+}
+- (void)analyzeSelection:(TCPinToolbarButton *)sender {
+    id controller = sender.captureController;
+    if (self.terminal || self.longActive || ![controller isKindOfClass:NSClassFromString(@"JTCaptureViewController")]) return;
+    NSImage *image = [controller generateCapturedImage];
+    if (![self beginResult:image phase:'A']) return;
+    BOOL codes = sender.tag == 1;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            NSError *error = nil;
+            NSData *data = image.TIFFRepresentation;
+            NSArray *values = codes ? TCRecognizeImageCodes(data, &error) : nil;
+            NSUInteger count = 0;
+            NSData *redacted = codes ? nil : TCRedactImage(data, &count, &error);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if ((codes && !values) || (!codes && !redacted.length)) {
+                    NSLog(@"image_analysis_failed domain=%@ code=%ld", error.domain ?: @"encoding", (long)error.code);
+                    [worker end:codes ? TC_WORKER_EXIT_CODE_FAILURE : TC_WORKER_EXIT_REDACTION_FAILURE];
+                    return;
+                }
+                if (codes && !values.count) { [worker end:TC_WORKER_EXIT_CODE_EMPTY]; return; }
+                NSPasteboard *board = [NSPasteboard pasteboardWithName:[NSString stringWithFormat:@"local.yichen.TencentCapture.analysis-%d", getpid()]];
+                [board clearContents];
+                BOOL written;
+                if (codes) written = [board setString:[values componentsJoinedByString:@"\n\n"] forType:@"local.yichen.TencentCapture.code-text"];
+                else written = [board setData:redacted forType:@"local.yichen.TencentCapture.redacted-png"] &&
+                               [board setString:@(count).stringValue forType:@"local.yichen.TencentCapture.redaction-count"];
+                NSLog(@"image_analysis_completed mode=%@ count=%lu", codes ? @"codes" : @"redaction", (unsigned long)(codes ? values.count : count));
+                [worker end:written ? (codes ? TC_WORKER_EXIT_CODE_SUCCESS : TC_WORKER_EXIT_REDACTION_SUCCESS) : TC_WORKER_EXIT_ENCODING_FAILURE];
+            });
+        }
+    });
+}
+- (void)translateSelection:(TCPinToolbarButton *)sender {
+    id controller = sender.captureController;
+    if (self.terminal || self.longActive || self.translationController ||
+        ![controller isKindOfClass:NSClassFromString(@"JTCaptureViewController")]) return;
+    NSView *capture = [controller captureView];
+    if (![capture isKindOfClass:NSClassFromString(@"JTCaptureView")]) return;
+    NSView *view = [(NSViewController *)controller view];
+    NSRect selectedInCapture = [(id)capture selectedRect];
+    NSRect selected = [view backingAlignedRect:[capture convertRect:selectedInCapture toView:view]
+                                       options:NSAlignAllEdgesInward];
+    NSWindow *owner = view.window;
+    NSRect frame = [owner convertRectToScreen:[view convertRect:selected toView:nil]];
+    NSImage *image = [controller generateCapturedImage];
+    if (!owner || NSIsEmptyRect(frame) || ![image isKindOfClass:NSImage.class]) return;
+    self.translationController = controller;
+    self.translationMouseState = [NSMapTable weakToStrongObjectsMapTable];
+    for (id c in [self.manager windowControllers]) {
+        NSWindow *window = [c window]; if (!window) continue;
+        [self.translationMouseState setObject:@(window.ignoresMouseEvents) forKey:window];
+        window.ignoresMouseEvents = YES;
+    }
+    [controller hideToolbar];
+    self.translationRecognizing = YES;
+    [self setPhaseValue:'T'];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:image.TIFFRepresentation];
+        NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (worker.terminal) return;
+            worker.translationRecognizing = NO;
+            [worker setPhaseValue:'T'];
+            if (!png.length) {
+                NSAlert *alert = [NSAlert new]; alert.messageText = @"无法读取截图";
+                alert.informativeText = @"请返回编辑后重新框选。";
+                [alert runModal]; [worker translationDone:nil action:0]; return;
+            }
+            TCShowImageTranslation((__bridge const void *)png, NULL,
+                (__bridge const void *)owner, frame.origin.x, frame.origin.y, frame.size.width, frame.size.height, TranslationDone);
+        });
+    });
+}
+- (void)translationDone:(NSData *)png action:(int32_t)action {
+    id controller = self.translationController; self.translationController = nil;
+    for (NSWindow *window in self.translationMouseState.keyEnumerator)
+        window.ignoresMouseEvents = [[self.translationMouseState objectForKey:window] boolValue];
+    self.translationMouseState = nil;
+    if (self.terminal) return;
+    if (action == 0) { [self setPhaseValue:'E']; [controller showToolbar]; return; }
+    NSImage *image = png.length ? [[NSImage alloc] initWithData:png] : nil;
+    [self finish:image save:action == 2];
 }
 - (void)finish:(NSImage *)image save:(BOOL)save {
     if (![self beginResult:image phase:'F']) return;

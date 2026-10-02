@@ -174,7 +174,7 @@ static char *copy_string(const char *value) {
 
 static bool valid_state(char state) {
     return state == 'P' || state == 'E' || state == 'S' ||
-           state == 'O' || state == 'L' || state == 'F';
+           state == 'O' || state == 'L' || state == 'A' || state == 'T' || state == 'F';
 }
 
 static bool state_has_precapture_deadline(char state) {
@@ -818,6 +818,12 @@ int TCSessionRunFakeWorker(const char *mode) {
     } else if (strcmp(mode, "healthy-long") == 0) {
         fake_pulse_for('L', 1600);
         TCWorkerFinish(0);
+    } else if (strcmp(mode, "healthy-analysis") == 0) {
+        fake_pulse_for('A', 1600);
+        TCWorkerFinish(TC_WORKER_EXIT_CODE_SUCCESS);
+    } else if (strcmp(mode, "healthy-translation") == 0) {
+        fake_pulse_for('T', 1600);
+        TCWorkerFinish(TC_WORKER_EXIT_CODE_SUCCESS);
     } else if (strcmp(mode, "crash") == 0) {
         TCWorkerPulse('P');
         _exit(26);

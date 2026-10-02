@@ -1,13 +1,45 @@
 #import <Cocoa/Cocoa.h>
 #import <Carbon/Carbon.h>
 #import <ServiceManagement/ServiceManagement.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "TCWorker.h"
 #import "TCSession.h"
 #import "TCHotkeyGate.h"
 #import "TCTranslation.h"
 #import "TCLifecycleAgent.h"
+#import "TCPinGeometry.h"
 
 static NSString *const AppName = @"bro截图";
+
+static BOOL CopyPNG(NSData *png) {
+    NSImage *image = png.length ? [[NSImage alloc] initWithData:png] : nil;
+    NSData *tiff = image.TIFFRepresentation;
+    if (!tiff.length) return NO;
+    NSPasteboardItem *item = [NSPasteboardItem new];
+    [item setData:png forType:NSPasteboardTypePNG];
+    [item setData:tiff forType:NSPasteboardTypeTIFF];
+    [NSPasteboard.generalPasteboard clearContents];
+    return [NSPasteboard.generalPasteboard writeObjects:@[item]];
+}
+static void SavePNG(NSData *png) {
+    if (!png.length) return;
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.allowedContentTypes = @[UTTypePNG];
+    NSDateFormatter *date = [NSDateFormatter new];
+    date.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    date.dateFormat = @"yyyyMMdd-HHmmss";
+    panel.nameFieldStringValue = [NSString stringWithFormat:@"bro截图-%@.png", [date stringFromDate:NSDate.date]];
+    [NSApp activateIgnoringOtherApps:YES];
+    [panel beginWithCompletionHandler:^(NSModalResponse response) {
+        if (response != NSModalResponseOK) return;
+        NSError *error = nil;
+        if (![png writeToURL:panel.URL options:NSDataWritingAtomic error:&error]) {
+            NSAlert *alert = [NSAlert new]; alert.messageText = @"图片保存未完成";
+            alert.informativeText = error.localizedDescription ?: @"请重新选择保存位置。";
+            [alert runModal];
+        }
+    }];
+}
 
 @interface TCPinnedPanel : NSPanel
 @end
@@ -21,6 +53,7 @@ static NSString *const AppName = @"bro截图";
 @end
 
 @interface TCPinnedImageView : NSImageView
+@property NSData *png;
 @end
 @implementation TCPinnedImageView
 - (BOOL)acceptsFirstResponder { return YES; }
@@ -35,8 +68,22 @@ static NSString *const AppName = @"bro截图";
     else [super keyDown:event];
 }
 - (void)closePin:(id)sender { [self.window close]; }
+- (void)copyPin:(id)sender { if (!CopyPNG(self.png)) NSBeep(); }
+- (void)savePin:(id)sender { SavePNG(self.png); }
+- (void)resetSize:(id)sender {
+    NSRect frame = self.window.frame;
+    if (frame.size.width <= 0 || self.image.size.width <= 0) return;
+    NSRect visible = (self.window.screen ?: NSScreen.mainScreen).visibleFrame;
+    NSPoint anchor = NSMakePoint(NSMidX(frame), NSMidY(frame));
+    [self.window setFrame:NSRectFromCGRect(TCPinZoomFrame(NSRectToCGRect(frame), NSSizeToCGSize(self.image.size), NSRectToCGRect(visible),
+                              NSPointToCGPoint(anchor), self.image.size.width / frame.size.width)) display:YES];
+}
 - (void)rightMouseDown:(NSEvent *)event {
     NSMenu *menu = [NSMenu new];
+    [menu addItemWithTitle:@"复制图片" action:@selector(copyPin:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"保存 PNG…" action:@selector(savePin:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"恢复原始大小" action:@selector(resetSize:) keyEquivalent:@""].target = self;
+    [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *close = [menu addItemWithTitle:@"关闭这张截图" action:@selector(closePin:) keyEquivalent:@""];
     close.target = self;
     [NSMenu popUpContextMenu:menu withEvent:event forView:self];
@@ -44,17 +91,9 @@ static NSString *const AppName = @"bro截图";
 - (void)scrollWheel:(NSEvent *)event {
     if (event.scrollingDeltaY == 0) return;
     NSRect visible = (self.window.screen ?: NSScreen.mainScreen).visibleFrame;
-    NSRect frame = self.window.frame;
-    CGFloat factor = pow(1.06, MIN(20.0, MAX(-20.0, event.scrollingDeltaY)));
-    CGFloat maximum = MIN(visible.size.width * 0.95 / frame.size.width,
-                          visible.size.height * 0.95 / frame.size.height);
-    CGFloat minimum = MIN(1.0, 60.0 / MIN(frame.size.width, frame.size.height));
-    factor = MAX(minimum, MIN(maximum, factor));
-    NSSize size = NSMakeSize(frame.size.width * factor, frame.size.height * factor);
-    NSPoint origin = NSMakePoint(NSMidX(frame) - size.width / 2, NSMidY(frame) - size.height / 2);
-    origin.x = MIN(MAX(origin.x, NSMinX(visible)), NSMaxX(visible) - size.width);
-    origin.y = MIN(MAX(origin.y, NSMinY(visible)), NSMaxY(visible) - size.height);
-    [self.window setFrame:(NSRect){origin, size} display:YES];
+    double factor = pow(1.06, MIN(20.0, MAX(-20.0, event.scrollingDeltaY)));
+    [self.window setFrame:NSRectFromCGRect(TCPinZoomFrame(NSRectToCGRect(self.window.frame), NSSizeToCGSize(self.image.size), NSRectToCGRect(visible),
+                              NSPointToCGPoint(NSEvent.mouseLocation), factor)) display:YES];
 }
 @end
 
@@ -73,6 +112,9 @@ static NSString *const AppName = @"bro截图";
 @property NSMenuItem *pinScreenshotItem;
 @property NSMenuItem *textItem;
 @property NSString *recognizedText;
+@property NSString *recognizedTitle;
+@property NSData *redactedPNG;
+@property NSPanel *redactionPreviewPanel;
 @property NSData *lastScreenshotPNG;
 @property NSMutableArray<NSWindow *> *pinnedScreenshotWindows;
 @property NSRunningApplication *previousApp;
@@ -92,6 +134,7 @@ static NSString *const AppName = @"bro截图";
 - (void)cancelRecognition:(id)sender;
 - (void)receivedSessionEvent:(NSString *)event value:(int)value;
 - (void)pinLastScreenshot:(id)sender;
+- (void)showRedactionPreview:(NSData *)png count:(NSUInteger)count;
 - (void)stopForWeChat:(id)sender;
 - (void)terminateForWeChat:(id)sender;
 @end
@@ -114,6 +157,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
 }
 @implementation CaptureApp
 - (void)setStatus:(NSString *)text {
+    if ([self.statusLine.title isEqualToString:text]) return;
     self.statusLine.title = text;
     self.statusItem.button.toolTip = [NSString stringWithFormat:@"%@ · %@", AppName, text];
     NSLog(@"status=%@", text);
@@ -123,23 +167,23 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     NSAlert *alert = [NSAlert new]; alert.messageText = title; alert.informativeText = detail;
     [alert addButtonWithTitle:@"知道了"]; [alert runModal];
 }
-- (void)showRecognitionProgress {
+- (void)showRecognitionProgress:(NSString *)title detail:(NSString *)text {
     if (self.recognitionProgressPanel || !self.sessionPending) return;
     NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 460, 150)
                                               styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                 backing:NSBackingStoreBuffered defer:NO];
-    panel.title = @"bro截图 · 正在提取文字";
+    panel.title = title;
     panel.delegate = self;
     panel.releasedWhenClosed = NO;
     panel.hidesOnDeactivate = NO;
-    NSTextField *detail = [NSTextField wrappingLabelWithString:@"正在本机识别，请稍候。\n完成后会自动显示文字与翻译窗口。"];
+    NSTextField *detail = [NSTextField wrappingLabelWithString:text];
     detail.frame = NSMakeRect(64, 69, 370, 55);
     [panel.contentView addSubview:detail];
     NSProgressIndicator *spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(24, 85, 24, 24)];
     spinner.style = NSProgressIndicatorStyleSpinning;
     [spinner startAnimation:nil];
     [panel.contentView addSubview:spinner];
-    NSButton *cancel = [NSButton buttonWithTitle:@"取消识别" target:self action:@selector(cancelRecognition:)];
+    NSButton *cancel = [NSButton buttonWithTitle:@"取消" target:self action:@selector(cancelRecognition:)];
     cancel.frame = NSMakeRect(330, 20, 104, 32);
     [panel.contentView addSubview:cancel];
     self.recognitionProgressPanel = panel;
@@ -150,7 +194,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
 - (void)cancelRecognition:(id)sender {
     if (self.sessionPending && _session && TCSessionIsActive(_session)) {
         TCSessionCancel(_session);
-        [self setStatus:@"正在取消文字识别…"];
+        [self setStatus:@"正在取消本机识别…"];
     }
 }
 - (BOOL)windowShouldClose:(NSWindow *)window {
@@ -169,7 +213,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     NSMenu *menu = [NSMenu new]; menu.autoenablesItems = NO;
     self.captureItem = [menu addItemWithTitle:@"截图  ⌘⌃A" action:@selector(capture:) keyEquivalent:@""]; self.captureItem.target = self;
     self.statusLine = [menu addItemWithTitle:@"正在注册快捷键…" action:nil keyEquivalent:@""]; self.statusLine.enabled = NO;
-    self.textItem = [menu addItemWithTitle:@"上次提取文字与翻译…" action:@selector(showRecognizedText:) keyEquivalent:@""];
+    self.textItem = [menu addItemWithTitle:@"上次文字/二维码与翻译…" action:@selector(showRecognizedText:) keyEquivalent:@""];
     self.textItem.target = self; self.textItem.enabled = NO;
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *retry = [menu addItemWithTitle:@"重新注册 ⌘⌃A" action:@selector(registerShortcut:) keyEquivalent:@""]; retry.target = self;
@@ -259,9 +303,13 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     if ([event isEqualToString:@"spawn"]) {
         self.activeWorkerPID = value;
     } else if ([event isEqualToString:@"state"]) {
-        NSDictionary *names = @{@('P'):@"正在采集屏幕…", @('E'):@"正在截图 · Esc 或再次 ⌘⌃A 取消", @('L'):@"原生长截图中 · Esc 或再次 ⌘⌃A 取消", @('S'):@"等待保存位置 · 取消不会改动剪贴板", @('O'):@"正在本机识别文字…", @('F'):@"正在处理截图…"};
+        NSDictionary *names = @{@('P'):@"正在采集屏幕…", @('E'):@"正在截图 · Esc 或再次 ⌘⌃A 取消", @('L'):@"原生长截图中 · Esc 或再次 ⌘⌃A 取消", @('S'):@"等待保存位置 · 取消不会改动剪贴板", @('O'):@"正在本机识别文字…", @('A'):@"正在本机分析选区…", @('T'):@"正在准备截图原位翻译…", @('F'):@"正在处理截图…"};
         NSString *name = names[@(value)]; if (name) [self setStatus:name];
-        if (value == 'O') [self showRecognitionProgress];
+        if ((value == 'E' || value == 'T') && self.recognitionProgressPanel) {
+            [self.recognitionProgressPanel close]; self.recognitionProgressPanel = nil;
+        }
+        if (value == 'O') [self showRecognitionProgress:@"bro截图 · 正在提取文字" detail:@"正在本机识别，请稍候。\n完成后会显示文字与翻译窗口。"];
+        if (value == 'A') [self showRecognitionProgress:@"bro截图 · 正在分析选区" detail:@"正在本机识别，请稍候。\n完成后显示结果或遮挡预览，不会替换剪贴板。"];
     } else if ([event isEqualToString:@"timeout"]) {
         [self setStatus:@"截图工作进程无响应，正在自动回收窗口…"];
     } else if ([event isEqualToString:@"exit"]) {
@@ -274,31 +322,50 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
         self.captureItem.title = @"截图  ⌘⌃A";
         NSDictionary *results = @{@0:@"图片已复制", @1:@"图片已保存", @2:@"识别文字已复制", @10:@"已取消 · 剪贴板保持原样", @11:@"已取消保存 · 剪贴板保持原样", @12:@"未识别到文字 · 剪贴板保持原样", @20:@"截图进程缺少录屏权限，请从菜单正常授权", @21:@"截图组件接口不兼容，已停止", @22:@"屏幕采集失败或显示器发生变化，已退出", @23:@"原生编辑器未启动，已退出", @24:@"图片转换或复制失败", @25:@"长截图未能完成，已退出", @26:@"截图组件异常，已回收窗口", @27:@"图像处理超时，已退出", @28:@"图片保存失败", @29:@"文字识别失败", @30:@"工作进程监管初始化失败", @31:@"截图已置顶在桌面"};
         NSString *message = results[@(value)] ?: [NSString stringWithFormat:@"截图工作进程已结束（%d），可以重试", value];
+        NSDictionary *analysisResults = @{@13:@"未发现二维码或条码 · 剪贴板保持原样", @32:@"二维码已识别 · 点击复制后才替换剪贴板", @33:@"智能遮挡已完成 · 请检查预览", @34:@"二维码识别未完成 · 剪贴板保持原样", @35:@"智能遮挡未完成 · 剪贴板保持原样"};
+        if (analysisResults[@(value)]) message = analysisResults[@(value)];
         if (!self.registrationOK) message = [message stringByAppendingString:@" · ⌘⌃A 未注册"];
         [self setStatus:message];
         NSRunningApplication *previous = self.previousApp; self.previousApp = nil;
+        int workerPID = self.activeWorkerPID;
+        self.activeWorkerPID = 0;
         if (value == TC_WORKER_EXIT_SUCCESS) {
             self.lastScreenshotPNG = [NSPasteboard.generalPasteboard dataForType:CapturedPNGBoardType];
             self.pinScreenshotItem.enabled = self.lastScreenshotPNG.length > 0;
         } else if (value == TC_WORKER_EXIT_PIN_SUCCESS) {
-            NSPasteboard *board = self.activeWorkerPID > 0 ? [NSPasteboard pasteboardWithName:[NSString stringWithFormat:@"local.yichen.TencentCapture.pin-%d", self.activeWorkerPID]] : nil;
+            NSPasteboard *board = workerPID > 0 ? [NSPasteboard pasteboardWithName:[NSString stringWithFormat:@"local.yichen.TencentCapture.pin-%d", workerPID]] : nil;
             NSData *png = [board dataForType:@"local.yichen.TencentCapture.pin-png"];
             [board releaseGlobally];
             if (png.length && [[NSImage alloc] initWithData:png]) {
                 self.lastScreenshotPNG = png;
                 self.pinScreenshotItem.enabled = YES;
                 [self pinLastScreenshot:nil];
+                return;
             } else {
                 [self setStatus:@"置顶图片未能读取，请重新截图"];
             }
         }
-        self.activeWorkerPID = 0;
+        if (value == TC_WORKER_EXIT_CODE_SUCCESS || value == TC_WORKER_EXIT_REDACTION_SUCCESS) {
+            NSPasteboard *board = workerPID > 0 ? [NSPasteboard pasteboardWithName:[NSString stringWithFormat:@"local.yichen.TencentCapture.analysis-%d", workerPID]] : nil;
+            NSString *text = [board stringForType:@"local.yichen.TencentCapture.code-text"];
+            NSData *png = [board dataForType:@"local.yichen.TencentCapture.redacted-png"];
+            NSUInteger count = [[board stringForType:@"local.yichen.TencentCapture.redaction-count"] integerValue];
+            [board releaseGlobally];
+            if (value == TC_WORKER_EXIT_CODE_SUCCESS && text.length) {
+                self.recognizedText = text; self.recognizedTitle = @"二维码/条码内容";
+                self.textItem.enabled = YES; [self showRecognizedText:nil];
+            } else if (value == TC_WORKER_EXIT_REDACTION_SUCCESS && png.length && [[NSImage alloc] initWithData:png]) {
+                [self showRedactionPreview:png count:count];
+            } else [self showMessage:@"识别结果未能读取" detail:@"请重新框选后再试。"];
+            return;
+        }
         if (value == TC_WORKER_EXIT_OCR_SUCCESS) {
             // Only accept the worker's tagged OCR result; never translate an
             // unrelated clipboard string automatically after a failed capture.
             NSString *text = [NSPasteboard.generalPasteboard stringForType:@"local.yichen.TencentCapture.ocr-text"];
             if (text.length) {
                 self.recognizedText = text;
+                self.recognizedTitle = @"提取文字";
                 self.textItem.enabled = YES;
                 [self showRecognizedText:nil];
                 return;
@@ -307,7 +374,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
             return;
         }
         if (wasRecognizing && value != TC_WORKER_EXIT_OCR_SUCCESS && value != 10) {
-            [self showMessage:message detail:@"请重新框选清晰的文字再试。"];
+            [self showMessage:message detail:@"请重新框选清晰的内容再试。"];
             return;
         }
         // Avoid stealing focus after a long edit if the user has switched elsewhere.
@@ -341,8 +408,9 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
 
     TCPinnedImageView *imageView = [[TCPinnedImageView alloc] initWithFrame:NSMakeRect(0, 0, imageSize.width, imageSize.height)];
     imageView.image = image;
+    imageView.png = self.lastScreenshotPNG;
     imageView.imageScaling = NSImageScaleProportionallyUpOrDown;
-    imageView.toolTip = @"拖动移动 · 滚轮缩放 · 双击或 Esc 关闭 · 右键关闭";
+    imageView.toolTip = @"拖动移动 · 滚轮缩放 · 双击或 Esc 关闭 · 右键复制/保存/恢复大小";
     imageView.accessibilityLabel = @"置顶截图";
     imageView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     window.contentView = imageView;
@@ -353,7 +421,8 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
                                                  name:NSWindowWillCloseNotification
                                                object:window];
     [window center];
-    [window orderFrontRegardless];
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
     [self setStatus:@"截图已置顶在桌面"];
     NSLog(@"screenshot_pinned size=%.0fx%.0f", imageSize.width, imageSize.height);
 }
@@ -363,7 +432,51 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     [[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowWillCloseNotification object:window];
 }
 - (void)showRecognizedText:(id)sender {
-    if (self.recognizedText.length) TCShowRecognizedText(self.recognizedText.UTF8String);
+    if (self.recognizedText.length) TCShowTextResult(self.recognizedText.UTF8String, (self.recognizedTitle ?: @"提取文字").UTF8String);
+}
+- (void)showRedactionPreview:(NSData *)png count:(NSUInteger)count {
+    [self.redactionPreviewPanel close];
+    self.redactedPNG = png;
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 720, 540)
+                       styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+                       backing:NSBackingStoreBuffered defer:NO];
+    panel.title = @"bro截图 · 智能遮挡预览"; panel.delegate = self;
+    panel.releasedWhenClosed = NO; panel.hidesOnDeactivate = NO;
+    NSTextField *label = [NSTextField labelWithString:count ? [NSString stringWithFormat:@"已遮挡 %lu 处敏感文字/人脸，请检查结果。", (unsigned long)count] : @"未检测到敏感内容，图片未修改。"];
+    label.frame = NSMakeRect(20, 502, 680, 24);
+    label.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [panel.contentView addSubview:label];
+    NSImageView *image = [[NSImageView alloc] initWithFrame:NSMakeRect(20, 100, 680, 388)];
+    image.image = [[NSImage alloc] initWithData:png]; image.imageScaling = NSImageScaleProportionallyUpOrDown;
+    image.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    image.accessibilityLabel = @"遮挡后的截图预览";
+    [panel.contentView addSubview:image];
+    NSTextField *hint = [NSTextField wrappingLabelWithString:@"自动识别可能漏检，请检查后再复制或保存。关闭窗口不会替换剪贴板。"];
+    hint.frame = NSMakeRect(20, 55, 680, 36); hint.autoresizingMask = NSViewWidthSizable;
+    [panel.contentView addSubview:hint];
+    NSArray *titles = @[@"复制图片", @"保存 PNG…", @"置顶", @"关闭"];
+    SEL actions[] = {@selector(copyRedaction:), @selector(saveRedaction:), @selector(pinRedaction:), @selector(closeRedaction:)};
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        NSButton *button = [NSButton buttonWithTitle:titles[i] target:self action:actions[i]];
+        button.frame = NSMakeRect(20 + i * 128, 15, 118, 32);
+        [panel.contentView addSubview:button];
+    }
+    panel.contentMinSize = NSMakeSize(560, 360);
+    self.redactionPreviewPanel = panel; [panel center]; [panel makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+- (void)copyRedaction:(id)sender {
+    if (CopyPNG(self.redactedPNG)) [self setStatus:@"遮挡后的图片已复制"];
+    else NSBeep();
+}
+- (void)saveRedaction:(id)sender { SavePNG(self.redactedPNG); }
+- (void)pinRedaction:(id)sender {
+    self.lastScreenshotPNG = self.redactedPNG; self.pinScreenshotItem.enabled = self.redactedPNG.length > 0;
+    [self pinLastScreenshot:nil];
+}
+- (void)closeRedaction:(id)sender { [self.redactionPreviewPanel close]; }
+- (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object == self.redactionPreviewPanel) { self.redactionPreviewPanel = nil; self.redactedPNG = nil; }
 }
 - (void)showHelp:(id)sender {
     if (self.showingHelp) return;
@@ -372,8 +485,8 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     NSAlert *alert = [NSAlert new];
     BOOL hasScreenPermission = CGPreflightScreenCaptureAccess();
     NSLog(@"screen_permission_preflight=%d", hasScreenPermission);
-    alert.messageText = @"bro截图 · 1001v8";
-    alert.informativeText = [NSString stringWithFormat:@"录屏权限：%@。\n微信联动：%@。\n\n固定快捷键：Command + Control + A。\n再次按下或 Esc 可取消本次截图。快捷键注册失败时会明确提示。\n\n保留原生标注编辑器；保存为 PNG，文字识别在本机完成。识别成功后可在文字窗口点击本机翻译（macOS 15+）；首次语言包下载由系统确认。\n\n录屏权限需由 macOS 正常授予。", hasScreenPermission ? @"已获得" : @"未获得", TCLifecycleAgentStatus()];
+    alert.messageText = @"bro截图 · 1.0（1002v2）";
+    alert.informativeText = [NSString stringWithFormat:@"录屏权限：%@。\n微信联动：%@。\n\n固定快捷键：Command + Control + A。\n再次按下或 Esc 可取消本次截图。快捷键注册失败时会明确提示。\n\n框选后点“翻译”，译文会显示在截图的原文字位置，可切换语言、查看原图、复制或保存译图（macOS 15+）。\n保留原生标注和提取文字；首次翻译语言包下载由系统确认。\n\n录屏权限需由 macOS 正常授予。", hasScreenPermission ? @"已获得" : @"未获得", TCLifecycleAgentStatus()];
     [alert addButtonWithTitle:@"关闭"]; [alert addButtonWithTitle:@"请求录屏权限"];
     [alert addButtonWithTitle:@"开始截图"].enabled = hasScreenPermission;
     self.helpAlert = alert;
@@ -439,7 +552,7 @@ int main(int argc, const char *argv[]) {
         }
         if (argc > 1 && (!strcmp(argv[1], "--verify-engine") || !strcmp(argv[1], "--diagnose"))) {
             NSError *error = nil; BOOL ok = TCVerifyEngine(&error);
-            NSDictionary *report = @{@"version":@"1001v8-candidate", @"fullPrivateABIValidated":@(ok), @"error":error.localizedDescription ?: @"", @"guiTested":@NO, @"appPermissionVerified":@NO, @"note":@"No NSApplication, capture, permission request or editor started."};
+            NSDictionary *report = @{@"version":@"1002v2-candidate", @"fullPrivateABIValidated":@(ok), @"error":error.localizedDescription ?: @"", @"guiTested":@NO, @"appPermissionVerified":@NO, @"note":@"No NSApplication, capture, permission request or editor started."};
             NSData *json = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:NULL];
             puts([[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding].UTF8String); return ok ? 0 : 1;
         }

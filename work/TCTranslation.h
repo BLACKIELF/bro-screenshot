@@ -3,4 +3,5 @@
 /* Main thread only. Creates a normal result window, never a capture overlay.
  * Translation starts only after the user presses the window's Translate button. */
 void TCShowRecognizedText(const char *utf8Text);
+void TCShowTextResult(const char *utf8Text, const char *utf8Title);
 #endif
