@@ -485,7 +485,7 @@ static OSStatus HotkeyHandler(EventHandlerCallRef next, EventRef event, void *co
     NSAlert *alert = [NSAlert new];
     BOOL hasScreenPermission = CGPreflightScreenCaptureAccess();
     NSLog(@"screen_permission_preflight=%d", hasScreenPermission);
-    alert.messageText = @"bro截图 · 1.0（1002v2）";
+    alert.messageText = @"bro截图 · 1.0（1002v3）";
     alert.informativeText = [NSString stringWithFormat:@"录屏权限：%@。\n微信联动：%@。\n\n固定快捷键：Command + Control + A。\n再次按下或 Esc 可取消本次截图。快捷键注册失败时会明确提示。\n\n框选后点“翻译”，译文会显示在截图的原文字位置，可切换语言、查看原图、复制或保存译图（macOS 15+）。\n保留原生标注和提取文字；首次翻译语言包下载由系统确认。\n\n录屏权限需由 macOS 正常授予。", hasScreenPermission ? @"已获得" : @"未获得", TCLifecycleAgentStatus()];
     [alert addButtonWithTitle:@"关闭"]; [alert addButtonWithTitle:@"请求录屏权限"];
     [alert addButtonWithTitle:@"开始截图"].enabled = hasScreenPermission;
@@ -552,7 +552,7 @@ int main(int argc, const char *argv[]) {
         }
         if (argc > 1 && (!strcmp(argv[1], "--verify-engine") || !strcmp(argv[1], "--diagnose"))) {
             NSError *error = nil; BOOL ok = TCVerifyEngine(&error);
-            NSDictionary *report = @{@"version":@"1002v2-candidate", @"fullPrivateABIValidated":@(ok), @"error":error.localizedDescription ?: @"", @"guiTested":@NO, @"appPermissionVerified":@NO, @"note":@"No NSApplication, capture, permission request or editor started."};
+            NSDictionary *report = @{@"version":@"1002v3-candidate", @"fullPrivateABIValidated":@(ok), @"error":error.localizedDescription ?: @"", @"guiTested":@NO, @"appPermissionVerified":@NO, @"note":@"No NSApplication, capture, permission request or editor started."};
             NSData *json = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:NULL];
             puts([[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding].UTF8String); return ok ? 0 : 1;
         }

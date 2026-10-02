@@ -24,6 +24,7 @@
 - (NSImage *)screenImage;
 - (NSWindow *)window;
 - (SCStream *)stream;
+- (void)setStream:(SCStream *)stream;
 - (id)toolbarWindowController;
 - (NSImage *)generateCapturedImage;
 - (NSView *)captureView;
@@ -41,7 +42,7 @@ static NSDictionary *RequiredABI(void) {
         @"JTCaptureWindowController": @{@"screenImage":@"@16@0:8", @"initWithFrame:screen:":@"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48"},
         @"JTCaptureViewController": @{@"showToolbar":@"v16@0:8", @"hideToolbar":@"v16@0:8", @"toolbarWindowController":@"@16@0:8", @"generateCapturedImage":@"@16@0:8", @"captureView":@"@16@0:8"},
         @"JTCaptureView": @{@"selectedRect":@"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8"},
-        @"JTLongCaptureManager": @{@"+sharedInstance":@"@16@0:8", @"prepareToLongCapture":@"v16@0:8", @"isCapturing":@"B16@0:8", @"stream":@"@16@0:8", @"window":@"@16@0:8", @"captureDidFinish:":@"v24@0:8@16", @"captureDidFinishWithImage:needSave:isHighResolution:":@"v32@0:8@16B24B28", @"captureDidCancel":@"v16@0:8"}
+        @"JTLongCaptureManager": @{@"+sharedInstance":@"@16@0:8", @"prepareToLongCapture":@"v16@0:8", @"isCapturing":@"B16@0:8", @"stream":@"@16@0:8", @"setStream:":@"v24@0:8@16", @"window":@"@16@0:8", @"captureDidFinish:":@"v24@0:8@16", @"captureDidFinishWithImage:needSave:isHighResolution:":@"v32@0:8@16B24B28", @"captureDidCancel":@"v16@0:8"}
     };
 }
 BOOL TCVerifyEngine(NSError **error) {
@@ -82,6 +83,7 @@ BOOL TCVerifyEngine(NSError **error) {
 @property BOOL terminal;
 @property BOOL longTransition;
 @property BOOL longActive;
+@property BOOL longCompleting;
 @property BOOL editorRequested;
 @property NSTimeInterval phaseStarted;
 @property NSMapTable<NSWindow *, NSPanel *> *pinToolbarPanels;
@@ -149,13 +151,39 @@ static void LongTransitionHook(id receiver, SEL sel, id notification) {
     @finally { worker.longTransition = NO; }
     NSLog(@"long_capture_transition native_cancel_is_not_terminal=1");
 }
-static void LongDoneHook(id receiver, SEL sel, id notification) {
-    if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ LongDoneHook(receiver, sel, notification); }); return; }
-    // Native long capture stops its stream, retrieves resImage, then calls FinishHook.
-    // Preserve that assembly pipeline. The supervisor bounds a native stop deadlock.
-    [worker setPhaseValue:'F'];
+static void CompleteLongCapture(id receiver, SEL sel, id notification) {
+    if (worker.terminal) return;
+    worker.longActive = NO;
+    // The stream is already stopped and cleared. Native code still reads its
+    // assembled resImage and save choice, then invokes our existing FinishHook.
     nativeLongDone(receiver, sel, notification);
     dispatch_async(dispatch_get_main_queue(), ^{ if (!worker.terminal) [worker end:25]; });
+}
+static void LongDoneHook(id receiver, SEL sel, id notification) {
+    if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ LongDoneHook(receiver, sel, notification); }); return; }
+    if (!notification || worker.terminal || worker.longCompleting) return;
+    worker.longCompleting = YES;
+    [worker setPhaseValue:'F'];
+    SCStream *stream = [receiver stream];
+    if (!stream) { CompleteLongCapture(receiver, sel, notification); return; }
+    // Native captureDidFinish: waits forever for stopCapture's completion on
+    // this main thread. Stop asynchronously first so main-thread callbacks,
+    // cancellation and heartbeats can run. Do not publish a partial result if
+    // stopping fails; the parent guard still owns emergency process cleanup.
+    NSError *removeError = nil;
+    if (![stream removeStreamOutput:receiver type:SCStreamOutputTypeScreen error:&removeError])
+        NSLog(@"long_remove_output_failed domain=%@ code=%ld", removeError.domain ?: @"unknown", (long)removeError.code);
+    [stream stopCaptureWithCompletionHandler:^(NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (worker.terminal) return;
+            if (error) {
+                NSLog(@"long_stop_failed domain=%@ code=%ld", error.domain, (long)error.code);
+                [worker end:TC_WORKER_EXIT_LONG_CAPTURE_FAILURE]; return;
+            }
+            [receiver setStream:nil];
+            CompleteLongCapture(receiver, sel, notification);
+        });
+    }];
 }
 static void Replace(NSString *name, NSString *selector, IMP hook) {
     method_setImplementation(class_getInstanceMethod(NSClassFromString(name), NSSelectorFromString(selector)), hook);

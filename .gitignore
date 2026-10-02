@@ -10,6 +10,8 @@
 !/docs/source-manifest-1002v2.json
 !/docs/third-party.md
 !/docs/validation-1002v2.md
+!/docs/source-manifest-1002v3.json
+!/docs/validation-1002v3.md
 !/work/main.m
 !/work/TCWorker.m
 !/work/TCWorker.h
@@ -46,3 +48,4 @@
 !/work/qa/test-ocr-helper.py
 !/work/qa/test-ocr-retry.m
 !/work/qa/ocr-helper-error-fixture.py
+!/work/qa/test-long-completion.m
