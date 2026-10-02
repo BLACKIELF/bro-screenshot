@@ -54,7 +54,7 @@ static NSDictionary *RequiredABI(void) {
         @"JTCaptureSetting": @{@"+sharedInstance":@"@16@0:8", @"setRunAlone:":@"v20@0:8B16", @"setHighResolution:":@"v20@0:8B16", @"setPlaySound:":@"v20@0:8B16"},
         @"JTCaptureRequest": @{@"setShowSwitch:":@"v20@0:8B16", @"setNeedSelectSavePath:":@"v20@0:8B16"},
         @"JTCaptureWindowController": @{@"screenImage":@"@16@0:8", @"initWithFrame:screen:":@"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48"},
-        @"JTCaptureViewController": @{@"showToolbar":@"v16@0:8", @"hideToolbar":@"v16@0:8", @"toolbarWindowController":@"@16@0:8", @"generateCapturedImage":@"@16@0:8", @"captureView":@"@16@0:8", @"editViewController":@"@16@0:8", @"editDidBegin:":@"v24@0:8@16"},
+        @"JTCaptureViewController": @{@"showToolbar":@"v16@0:8", @"hideToolbar":@"v16@0:8", @"selectionDidChange":@"v16@0:8", @"toolbarWindowController":@"@16@0:8", @"generateCapturedImage":@"@16@0:8", @"captureView":@"@16@0:8", @"editViewController":@"@16@0:8", @"editDidBegin:":@"v24@0:8@16"},
         @"JTEditViewController": @{@"editView":@"@16@0:8"},
         @"JTEditView": @{@"addItem:":@"v24@0:8@16", @"itemArray":@"@16@0:8", @"itemIsBottomLevel:":@"B24@0:8@16", @"undoManager":@"@16@0:8", @"unfocus":@"v16@0:8"},
         @"JTRoundRectItem": @{@"initWithSuperView:centerPoint:size:":@"@56@0:8@16{CGPoint=dd}24{CGSize=dd}40", @"drawGraph":@"v16@0:8", @"copyWithZone:":@"@24@0:8^{_NSZone=}16", @"center":@"{CGPoint=dd}16@0:8", @"size":@"{CGSize=dd}16@0:8", @"setSize:":@"v32@0:8{CGSize=dd}16", @"updateControlPoints":@"v16@0:8", @"transformDidChange":@"v16@0:8", @"degrees":@"d16@0:8"},
@@ -87,6 +87,73 @@ BOOL TCVerifyEngine(NSError **error) {
 @end
 @implementation TCPinToolbarButton
 @end
+
+@interface TCPinToolbarPanel : NSPanel
+@property(weak) id captureController;
+@end
+@implementation TCPinToolbarPanel
+@end
+
+// BEGIN pure toolbar geometry (also compiled by the offscreen QA harness).
+static CGFloat TCPinOverlap(NSRect a, NSRect b) {
+    NSRect intersection = NSIntersectionRect(a, b);
+    return intersection.size.width * intersection.size.height;
+}
+static NSRect TCPinToolbarFrame(NSSize size, NSRect toolbar, NSRect selection,
+                                const NSRect *screens, NSUInteger count) {
+    NSRect best = NSZeroRect;
+    CGFloat bestScore[6] = {INFINITY, INFINITY, INFINITY, INFINITY, INFINITY, INFINITY};
+    if (size.width <= 0 || size.height <= 0) return best;
+    for (NSUInteger screenIndex = 0; screenIndex < count; screenIndex++) {
+        NSRect screen = screens[screenIndex];
+        if (screen.size.width < size.width || screen.size.height < size.height) continue;
+        CGFloat left = NSMinX(screen), right = NSMaxX(screen) - size.width;
+        CGFloat bottom = NSMinY(screen), top = NSMaxY(screen) - size.height;
+        CGFloat idealX = NSMaxX(toolbar) + 3, idealY = NSMidY(toolbar) - size.height / 2;
+        // Include screen and obstacle edges, with and without a 3pt gap. The
+        // Cartesian product covers every free rectangle, including exact fits;
+        // overlap area is bilinear between these edges, so its minimum is here.
+        CGFloat xs[19] = {left, right, idealX}, ys[19] = {bottom, top, idealY};
+        NSUInteger n = 3;
+        NSRect obstacles[] = {selection, toolbar};
+        for (NSUInteger i = 0; i < 2; i++) {
+            for (NSUInteger gap = 0; gap <= 3; gap += 3) {
+                NSRect r = NSInsetRect(obstacles[i], -(CGFloat)gap, -(CGFloat)gap);
+                xs[n] = NSMinX(r) - size.width; ys[n++] = NSMinY(r) - size.height;
+                xs[n] = NSMinX(r); ys[n++] = NSMinY(r);
+                xs[n] = NSMaxX(r) - size.width; ys[n++] = NSMaxY(r) - size.height;
+                xs[n] = NSMaxX(r); ys[n++] = NSMaxY(r);
+            }
+        }
+        for (NSUInteger xi = 0; xi < n; xi++) for (NSUInteger yi = 0; yi < n; yi++) {
+            NSRect frame = NSMakeRect(MIN(MAX(xs[xi], left), right), MIN(MAX(ys[yi], bottom), top),
+                                      size.width, size.height);
+            CGFloat overlap = TCPinOverlap(frame, selection);
+            CGFloat nativeOverlap = TCPinOverlap(frame, toolbar);
+            // The auxiliary panel is never allowed to cover captured pixels or
+            // the native controls it sits beside. If no fully visible free
+            // rectangle exists, return an empty frame so the caller hides it.
+            if (overlap > 0 || nativeOverlap > 0) continue;
+            CGFloat dx = frame.origin.x - idealX, dy = frame.origin.y - idealY;
+            // Prefer the native toolbar's display, breathing room, and then
+            // proximity. Every accepted candidate is already content-safe.
+            CGFloat score[] = {overlap, TCPinOverlap(frame, toolbar), (CGFloat)screenIndex,
+                TCPinOverlap(frame, NSInsetRect(toolbar, -3, -3)) +
+                    TCPinOverlap(frame, NSInsetRect(selection, -3, -3)),
+                overlap > 0 ? MIN(frame.origin.x-left, right-frame.origin.x) +
+                              MIN(frame.origin.y-bottom, top-frame.origin.y) : 0,
+                dx*dx + dy*dy};
+            for (NSUInteger k = 0; k < 6; k++) {
+                if (score[k] > bestScore[k]) break;
+                if (score[k] < bestScore[k]) {
+                    best = frame; memcpy(bestScore, score, sizeof(score)); break;
+                }
+            }
+        }
+    }
+    return best;
+}
+// END pure toolbar geometry.
 
 // A rectangular native edit item retains only its pixelated crop. Native
 // controls, move/resize, hit testing and undo keep using the existing editor.
@@ -196,7 +263,7 @@ static BOOL ApplyMosaicItems(NSView *edit, NSData *png, NSArray<NSDictionary *> 
 @property BOOL longCompleting;
 @property BOOL editorRequested;
 @property NSTimeInterval phaseStarted;
-@property NSMapTable<NSWindow *, NSPanel *> *pinToolbarPanels;
+@property NSMapTable<NSWindow *, TCPinToolbarPanel *> *pinToolbarPanels;
 @property id translationController;
 @property NSMapTable<NSWindow *, NSNumber *> *translationMouseState;
 @property BOOL translationRecognizing;
@@ -210,6 +277,7 @@ static BOOL ApplyMosaicItems(NSView *edit, NSData *png, NSArray<NSDictionary *> 
 - (void)setPhaseValue:(char)value;
 - (void)showPinToolbarForController:(id)controller;
 - (void)hidePinToolbarForController:(id)controller;
+- (void)updatePinToolbarForController:(id)controller;
 - (void)pinSelection:(TCPinToolbarButton *)sender;
 - (void)analyzeSelection:(TCPinToolbarButton *)sender;
 - (void)translateSelection:(TCPinToolbarButton *)sender;
@@ -228,6 +296,7 @@ static void (*nativeLongTransition)(id, SEL, id);
 static void (*nativeLongDone)(id, SEL, id);
 static void (*nativeShowToolbar)(id, SEL);
 static void (*nativeHideToolbar)(id, SEL);
+static void (*nativeSelectionDidChange)(id, SEL);
 static void ShowToolbarHook(id receiver, SEL sel) {
     nativeShowToolbar(receiver, sel);
     [worker showPinToolbarForController:receiver];
@@ -235,6 +304,10 @@ static void ShowToolbarHook(id receiver, SEL sel) {
 static void HideToolbarHook(id receiver, SEL sel) {
     [worker hidePinToolbarForController:receiver];
     nativeHideToolbar(receiver, sel);
+}
+static void SelectionDidChangeHook(id receiver, SEL sel) {
+    nativeSelectionDidChange(receiver, sel);
+    [worker updatePinToolbarForController:receiver];
 }
 static id ScreenImageHook(id receiver, SEL sel, NSScreen *screen) {
     NSNumber *display = screen.deviceDescription[@"NSScreenNumber"];
@@ -345,9 +418,11 @@ static void UncaughtException(NSException *exception) {
     nativeLongDone = (void *)method_getImplementation(class_getInstanceMethod(NSClassFromString(@"JTLongCaptureManager"), NSSelectorFromString(@"captureDidFinish:")));
     nativeShowToolbar = (void *)method_getImplementation(class_getInstanceMethod(NSClassFromString(@"JTCaptureViewController"), NSSelectorFromString(@"showToolbar")));
     nativeHideToolbar = (void *)method_getImplementation(class_getInstanceMethod(NSClassFromString(@"JTCaptureViewController"), NSSelectorFromString(@"hideToolbar")));
+    nativeSelectionDidChange = (void *)method_getImplementation(class_getInstanceMethod(NSClassFromString(@"JTCaptureViewController"), NSSelectorFromString(@"selectionDidChange")));
     self.pinToolbarPanels = [NSMapTable weakToStrongObjectsMapTable];
     Replace(@"JTCaptureViewController", @"showToolbar", (IMP)ShowToolbarHook);
     Replace(@"JTCaptureViewController", @"hideToolbar", (IMP)HideToolbarHook);
+    Replace(@"JTCaptureViewController", @"selectionDidChange", (IMP)SelectionDidChangeHook);
     Replace(@"JTCaptureManager", @"captureDidCancel", (IMP)CancelHook);
     Replace(@"JTCaptureManager", @"captureDidFinishWithImage:needSave:isHighResolution:", (IMP)FinishHook);
     Replace(@"JTCaptureManager", @"prepareToOCRWithImage:isHighResolution:", (IMP)OCRHook);
@@ -437,21 +512,48 @@ static void UncaughtException(NSException *exception) {
     }
     return YES;
 }
-- (void)positionPinToolbar:(NSPanel *)panel besideWindow:(NSWindow *)toolbar {
-    NSRect frame = toolbar.frame;
-    NSRect screen = (toolbar.screen ?: NSScreen.mainScreen).frame;
-    CGFloat width = panel.frame.size.width, height = panel.frame.size.height;
-    CGFloat x = NSMaxX(frame) + 3;
-    if (x + width > NSMaxX(screen)) x = NSMinX(frame) - width - 3;
-    CGFloat y = NSMidY(frame) - height / 2;
-    x = MIN(MAX(x, NSMinX(screen)), NSMaxX(screen) - width);
-    y = MIN(MAX(y, NSMinY(screen)), NSMaxY(screen) - height);
-    [panel setFrameOrigin:NSMakePoint(x, y)];
+- (BOOL)positionPinToolbar:(TCPinToolbarPanel *)panel besideWindow:(NSWindow *)toolbar {
+    NSView *capture = [panel.captureController captureView];
+    if (!capture.window || !toolbar.visible) return NO;
+    NSRect selected = [(id)capture selectedRect];
+    if (NSIsEmptyRect(selected)) return NO;
+    selected = [capture.window convertRectToScreen:[capture convertRect:selected toView:nil]];
+    NSMutableArray<NSScreen *> *screens = [NSScreen.screens mutableCopy];
+    NSScreen *preferred = toolbar.screen ?: capture.window.screen;
+    if ([screens containsObject:preferred]) {
+        [screens removeObject:preferred]; [screens insertObject:preferred atIndex:0];
+    }
+    NSUInteger count = screens.count;
+    NSRect frames[MAX((NSUInteger)1, count)];
+    for (NSUInteger i = 0; i < count; i++) frames[i] = screens[i].visibleFrame;
+    NSRect frame = TCPinToolbarFrame(panel.frame.size, toolbar.frame, selected, frames, count);
+    if (NSIsEmptyRect(frame)) return NO;
+    if (!NSEqualRects(panel.frame, frame)) [panel setFrameOrigin:frame.origin];
+    // Child windows report their frame in screen coordinates. Recheck the
+    // actual frame after AppKit applies the move so a coordinate mismatch or
+    // deferred child-window adjustment cannot leave controls over captured
+    // pixels or native controls.
+    return TCPinOverlap(panel.frame, selected) == 0 &&
+           TCPinOverlap(panel.frame, toolbar.frame) == 0;
+}
+- (void)updatePinToolbarForController:(id)controller {
+    // Only update an existing, visible panel; selection changes must not
+    // resurrect controls hidden for translation, mosaic or native editing.
+    for (NSWindow *toolbar in self.pinToolbarPanels.keyEnumerator) {
+        TCPinToolbarPanel *panel = [self.pinToolbarPanels objectForKey:toolbar];
+        if (panel.captureController == controller && panel.visible &&
+            ![self positionPinToolbar:panel besideWindow:toolbar]) [panel orderOut:nil];
+    }
 }
 - (void)toolbarFrameChanged:(NSNotification *)notification {
     NSWindow *toolbar = notification.object;
-    NSPanel *panel = [self.pinToolbarPanels objectForKey:toolbar];
-    if (panel) [self positionPinToolbar:panel besideWindow:toolbar];
+    TCPinToolbarPanel *panel = [self.pinToolbarPanels objectForKey:toolbar];
+    if (!panel.visible) return;
+    [self updatePinToolbarForController:panel.captureController];
+    // AppKit may move child windows after posting the parent's notification.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self updatePinToolbarForController:panel.captureController];
+    });
 }
 - (void)showPinToolbarForController:(id)controller {
     if (self.terminal || self.longActive || self.translationController || self.mosaicController) return;
@@ -459,14 +561,18 @@ static void UncaughtException(NSException *exception) {
     if (![windowController isKindOfClass:NSWindowController.class]) return;
     NSWindow *toolbar = windowController.window;
     if (!toolbar.visible) return;
-    NSPanel *panel = [self.pinToolbarPanels objectForKey:toolbar];
+    TCPinToolbarPanel *panel = [self.pinToolbarPanels objectForKey:toolbar];
     if (!panel) {
-        panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 284, 30)
+        panel = [[TCPinToolbarPanel alloc] initWithContentRect:NSMakeRect(0, 0, 284, 30)
                                           styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
                                             backing:NSBackingStoreBuffered defer:NO];
         panel.releasedWhenClosed = NO;
         panel.hidesOnDeactivate = NO;
         panel.backgroundColor = NSColor.controlBackgroundColor;
+        panel.hasShadow = NO; // A shadow must not spill back into selected pixels.
+        // Keep this UI in its own window, outside the capture/edit view tree.
+        // Native export caches that view tree over our pre-editor screen image.
+        panel.sharingType = NSWindowSharingNone;
         panel.level = toolbar.level;
         panel.collectionBehavior = toolbar.collectionBehavior;
         NSArray *titles = @[@"置顶", @"二维码", @"AI马赛克", @"翻译"];
@@ -488,11 +594,12 @@ static void UncaughtException(NSException *exception) {
         }
         [self.pinToolbarPanels setObject:panel forKey:toolbar];
         [toolbar addChildWindow:panel ordered:NSWindowAbove];
-        for (NSString *name in @[NSWindowDidMoveNotification, NSWindowDidResizeNotification])
+        for (NSString *name in @[NSWindowDidMoveNotification, NSWindowDidResizeNotification, NSWindowDidChangeScreenNotification])
             [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(toolbarFrameChanged:) name:name object:toolbar];
     }
-    [self positionPinToolbar:panel besideWindow:toolbar];
-    [panel orderFront:nil];
+    panel.captureController = controller;
+    if ([self positionPinToolbar:panel besideWindow:toolbar]) [panel orderFront:nil];
+    else [panel orderOut:nil];
 }
 - (void)hidePinToolbarForController:(id)controller {
     NSWindowController *windowController = [controller toolbarWindowController];
